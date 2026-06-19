@@ -60,14 +60,23 @@ export async function runGit(args: string[], opts: RunOpts = {}): Promise<GitRes
   }
   finalArgs.push(...args)
 
+  const { randomUUID } = await import('crypto')
+  const runId = randomUUID()
+  const outPath = path.join(os.tmpdir(), `git-cmd-out-${runId}.log`)
+  const errPath = path.join(os.tmpdir(), `git-cmd-err-${runId}.log`)
+
+  const escapeShellArg = (arg: string): string => {
+    return `'${arg.replace(/'/g, "'\\''")}'`
+  }
+  const shellCmd = `git ${finalArgs.map(escapeShellArg).join(' ')} > ${escapeShellArg(outPath)} 2> ${escapeShellArg(errPath)}`
+
   return new Promise((resolve) => {
     let child: any
     try {
-      child = spawn('git', finalArgs, {
+      child = spawn('sh', ['-c', shellCmd], {
         cwd: opts.cwd,
         env,
-        // Using 'ignore' for stdin prevents EBADF error in detached or background processes
-        stdio: ['ignore', 'pipe', 'pipe'],
+        stdio: 'ignore',
       })
     } catch (spawnError: any) {
       resolve({
@@ -78,25 +87,7 @@ export async function runGit(args: string[], opts: RunOpts = {}): Promise<GitRes
       return
     }
 
-    let stdout = ''
-    let stderr = ''
     let timedOut = false
-
-    child.on('error', (err: any) => {
-      stderr += `\n[skill-studio] spawn error: ${err.message}`
-    })
-
-    if (child.stdout) {
-      child.stdout.on('data', (chunk: any) => {
-        stdout += chunk.toString()
-      })
-    }
-    if (child.stderr) {
-      child.stderr.on('data', (chunk: any) => {
-        stderr += chunk.toString()
-      })
-    }
-
     const timer = setTimeout(() => {
       timedOut = true
       try {
@@ -104,8 +95,34 @@ export async function runGit(args: string[], opts: RunOpts = {}): Promise<GitRes
       } catch {}
     }, opts.timeoutMs ?? 60_000)
 
-    child.on('close', (code) => {
+    child.on('error', async (err: any) => {
       clearTimeout(timer)
+      let stdout = ''
+      let stderr = `[skill-studio] spawn error: ${err.message}`
+      try {
+        stdout = await fs.readFile(outPath, 'utf8')
+        stderr += '\n' + await fs.readFile(errPath, 'utf8')
+        await fs.unlink(outPath)
+        await fs.unlink(errPath)
+      } catch {}
+      resolve({
+        code: -1,
+        stdout,
+        stderr,
+      })
+    })
+
+    child.on('close', async (code: number) => {
+      clearTimeout(timer)
+      let stdout = ''
+      let stderr = ''
+      try {
+        stdout = await fs.readFile(outPath, 'utf8')
+        stderr = await fs.readFile(errPath, 'utf8')
+        await fs.unlink(outPath)
+        await fs.unlink(errPath)
+      } catch {}
+      
       resolve({
         code: timedOut ? -1 : (code ?? -1),
         stdout,
@@ -113,7 +130,6 @@ export async function runGit(args: string[], opts: RunOpts = {}): Promise<GitRes
       })
     })
   })
-
 }
 
 async function dirExists(p: string): Promise<boolean> {
