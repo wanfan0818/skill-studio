@@ -1,0 +1,212 @@
+@import "tailwindcss";
+
+:root {
+  /* Geist Dark Theme Tokens (Default) */
+  --geist-bg-100: #000000;
+  --geist-bg-200: #0a0a0a;
+  --geist-bg-300: #1c1c1c;
+  --geist-border-400: #333333;
+  --geist-border-500: #444444;
+  --geist-border-600: #666666;
+  --geist-gray-900: #888888;
+  --geist-gray-1000: #ffffff;
+  
+  --geist-blue: #0070f3;
+  --geist-red: #e00000;
+  --geist-amber: #f5a623;
+  
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.16);
+  --shadow-popover: 0 1px 1px rgba(0, 0, 0, 0.02), 0 4px 8px -4px rgba(0, 0, 0, 0.04), 0 16px 24px -8px rgba(0, 0, 0, 0.06);
+  --shadow-modal: 0 1px 1px rgba(0, 0, 0, 0.02), 0 8px 16px -4px rgba(0, 0, 0, 0.04), 0 24px 32px -8px rgba(0, 0, 0, 0.06);
+}
+
+html.light {
+  /* Geist Light Theme Tokens */
+  --geist-bg-100: #ffffff;
+  --geist-bg-200: #fafafa;
+  --geist-bg-300: #eaeaea;
+  --geist-border-400: #eaeaea;
+  --geist-border-500: #cccccc;
+  --geist-border-600: #999999;
+  --geist-gray-900: #666666;
+  --geist-gray-1000: #000000;
+  
+  --geist-blue: #0070f3;
+  --geist-red: #ee0000;
+  --geist-amber: #f5a623;
+  
+  --shadow-raised: 0 1px 2px rgba(0, 0, 0, 0.05);
+  --shadow-popover: 0 1px 1px rgba(0, 0, 0, 0.02), 0 4px 8px -4px rgba(0, 0, 0, 0.04), 0 16px 24px -8px rgba(0, 0, 0, 0.06);
+  --shadow-modal: 0 1px 1px rgba(0, 0, 0, 0.02), 0 8px 16px -4px rgba(0, 0, 0, 0.04), 0 24px 32px -8px rgba(0, 0, 0, 0.06);
+}
+
+@theme {
+  /* slate color mapping to Geist tones */
+  --color-slate-950: var(--geist-bg-100);
+  --color-slate-900: var(--geist-bg-200);
+  --color-slate-800: var(--geist-bg-300);
+  --color-slate-700: var(--geist-border-400);
+  --color-slate-600: var(--geist-border-500);
+  --color-slate-500: var(--geist-border-600);
+  --color-slate-400: var(--geist-gray-900);
+  --color-slate-300: var(--geist-gray-900);
+  --color-slate-200: var(--geist-gray-1000);
+  --color-slate-100: var(--geist-gray-1000);
+  --color-slate-5: var(--geist-bg-200);
+
+  /* Button bindings - map indigo-600 (used for primary button in standard Tailwind) to Geist solid white */
+  --color-indigo-600: var(--geist-gray-1000);
+  --color-indigo-500: var(--geist-gray-900);
+  --color-indigo-400: var(--geist-blue);
+  --color-indigo-300: var(--geist-blue);
+  --color-indigo-750: var(--geist-border-600);
+  
+  --color-blue-500: var(--geist-blue);
+  --color-blue-900: var(--geist-blue);
+  --color-red-500: var(--geist-red);
+  --color-red-800: var(--geist-red);
+  --color-amber-500: var(--geist-amber);
+  --color-amber-800: var(--geist-amber);
+
+  /* Font Family overrides */
+  --font-sans: -apple-system, BlinkMacSystemFont, "Segoe UI", "Geist Sans", "Inter", system-ui, sans-serif;
+  --font-mono: "Geist Mono", SFMono-Regular, Consolas, "Liberation Mono", Menlo, Courier, monospace;
+
+  /* Radius overrides */
+  --radius-xl: 12px;
+  --radius-lg: 6px;
+  --radius-md: 6px;
+  --radius-sm: 4px;
+}
+
+/* ============================================
+   Geist Design System Overrides
+   ============================================ */
+
+/* 1. Global Reset & Body */
+body {
+  background-color: var(--geist-bg-100) !important;
+  color: var(--geist-gray-1000) !important;
+  font-family: var(--font-sans) !important;
+  margin: 0;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* 2. Unified Focus Ring */
+*:focus-visible {
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--geist-bg-100), 0 0 0 4px var(--geist-blue) !important;
+}
+
+/* 3. Inputs & Forms */
+input, textarea, select {
+  background-color: var(--geist-bg-100) !important;
+  border: 1px solid var(--geist-border-400) !important;
+  color: var(--geist-gray-1000) !important;
+  border-radius: var(--radius-md) !important;
+  padding: 8px 12px;
+  font-family: var(--font-sans);
+  transition: border-color 150ms ease, box-shadow 150ms ease;
+}
+
+input:focus, textarea:focus, select:focus {
+  border-color: var(--geist-border-600) !important;
+  box-shadow: 0 0 0 2px var(--geist-bg-100), 0 0 0 4px var(--geist-blue) !important;
+  outline: none !important;
+}
+
+/* 4. Scrollbar Style */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--geist-border-400) !important;
+  border-radius: 9999px !important;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--geist-border-500) !important;
+}
+
+/* 5. Typography */
+code, pre {
+  font-family: var(--font-mono) !important;
+}
+
+/* 6. Buttons Overrides */
+.bg-indigo-600,
+button.bg-indigo-600 {
+  background-color: var(--geist-gray-1000) !important;
+  color: var(--geist-bg-100) !important;
+  border: 1px solid var(--geist-gray-1000) !important;
+  border-radius: var(--radius-md) !important;
+  font-weight: 500 !important;
+  transition: background-color 150ms ease, border-color 150ms ease !important;
+}
+
+.bg-indigo-600:hover,
+button.bg-indigo-600:hover:not(:disabled) {
+  background-color: var(--geist-bg-300) !important;
+  border-color: var(--geist-border-500) !important;
+  color: var(--geist-gray-1000) !important;
+}
+
+/* Destructive/Error buttons */
+.bg-red-600,
+button.bg-red-600,
+.bg-red-800,
+button.bg-red-800 {
+  background-color: var(--geist-red) !important;
+  color: #ffffff !important;
+  border: 1px solid var(--geist-red) !important;
+}
+.bg-red-600:hover,
+button.bg-red-600:hover:not(:disabled),
+.bg-red-800:hover,
+button.bg-red-800:hover:not(:disabled) {
+  background-color: #b00000 !important;
+  border-color: #b00000 !important;
+}
+
+/* Secondary Button standard styles */
+.border-slate-800,
+.border-slate-700\/50,
+.border-slate-700 {
+  border-color: var(--geist-border-400) !important;
+}
+
+/* 7. Hover background utility classes */
+.hover\:bg-slate-800:hover,
+.hover\:bg-slate-800\/40:hover {
+  background-color: var(--geist-bg-200) !important;
+}
+
+/* 8. Card Elevation & Depth overrides */
+.rounded-xl.border,
+.rounded-lg.border {
+  border-radius: var(--radius-lg) !important;
+  border-color: var(--geist-border-400) !important;
+  box-shadow: var(--shadow-raised) !important;
+  background-color: var(--geist-bg-100) !important;
+}
+
+/* Secondary separation containers */
+.bg-slate-900\/60,
+.bg-slate-900\/50,
+.bg-slate-900\/30,
+.bg-slate-800\/40,
+.bg-slate-800\/50 {
+  background-color: var(--geist-bg-200) !important;
+  border-color: var(--geist-border-400) !important;
+  border-radius: var(--radius-lg) !important;
+}
+
+/* Diff Viewer */
+.bg-green-500\/8 { background-color: rgba(0, 112, 243, 0.08) !important; }
+.bg-red-500\/8 { background-color: rgba(224, 0, 0, 0.08) !important; }
+.text-green-300 { color: var(--geist-blue); }
+.text-red-300 { color: var(--geist-red); }

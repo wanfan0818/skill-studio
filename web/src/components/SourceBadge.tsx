@@ -1,0 +1,47 @@
+import { getAgentMeta } from '../agents'
+
+const sourceColors: Record<string, { bg: string; text: string }> = {
+  newmax: { bg: 'bg-purple-500/20', text: 'text-purple-400' },
+  agents: { bg: 'bg-cyan-500/20', text: 'text-cyan-400' },
+  local: { bg: 'bg-green-500/20', text: 'text-green-400' },
+  symlink: { bg: 'bg-yellow-500/20', text: 'text-yellow-400' },
+  unknown: { bg: 'bg-gray-500/20', text: 'text-gray-400' },
+}
+
+const scopeColors: Record<string, { bg: string; text: string }> = {
+  global: { bg: 'bg-blue-500/10', text: 'text-blue-500' },
+  project: { bg: 'bg-amber-500/20', text: 'text-amber-400' },
+  plugin: { bg: 'bg-pink-500/20', text: 'text-pink-400' },
+}
+
+export function SourceBadge({ source }: { source: string }) {
+  const colors = sourceColors[source] || sourceColors.unknown
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${colors.bg} ${colors.text}`}>
+      {source}
+    </span>
+  )
+}
+
+export function AgentBadge({ agent }: { agent: string }) {
+  const meta = getAgentMeta(agent)
+  return (
+    <span
+      title={meta.name}
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[11px] font-medium ring-1 ${meta.color.bg} ${meta.color.text} ${meta.color.ring}`}
+    >
+      <span>{meta.icon}</span>
+      <span className="truncate max-w-[80px]">{meta.name}</span>
+    </span>
+  )
+}
+
+export function ScopeBadge({ scope }: { scope: string }) {
+  const colors = scopeColors[scope] || scopeColors.global
+  const labels: Record<string, string> = { global: '全局', project: '项目级', plugin: '插件' }
+  return (
+    <span className={`inline-flex items-center px-2 py-0.5 rounded text-xs font-medium ${colors.bg} ${colors.text}`}>
+      {labels[scope] || scope}
+    </span>
+  )
+}
