@@ -114,11 +114,25 @@ export async function buildExportTarball(skills: Skill[]): Promise<ExportResult 
 
 function runTar(args: string[]): Promise<{ code: number; stderr: string }> {
   return new Promise((resolve) => {
-    const child = spawn('tar', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    let child: any
+    try {
+      child = spawn('tar', args, { stdio: ['ignore', 'ignore', 'pipe'] })
+    } catch (spawnError: any) {
+      resolve({ code: -1, stderr: `Failed to spawn tar: ${spawnError.message}` })
+      return
+    }
+
     let stderr = ''
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
+    child.on('error', (err: any) => {
+      stderr += `\n[skill-studio] tar spawn error: ${err.message}`
     })
+
+    if (child.stderr) {
+      child.stderr.on('data', (chunk: any) => {
+        stderr += chunk.toString()
+      })
+    }
     child.on('close', (code) => resolve({ code: code ?? -1, stderr }))
   })
 }
+

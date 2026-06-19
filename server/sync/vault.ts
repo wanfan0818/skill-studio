@@ -61,21 +61,41 @@ export async function runGit(args: string[], opts: RunOpts = {}): Promise<GitRes
   finalArgs.push(...args)
 
   return new Promise((resolve) => {
-    const child = spawn('git', finalArgs, {
-      cwd: opts.cwd,
-      env,
-      stdio: ['pipe', 'pipe', 'pipe'],
-    })
+    let child: any
+    try {
+      child = spawn('git', finalArgs, {
+        cwd: opts.cwd,
+        env,
+        // Using 'ignore' for stdin prevents EBADF error in detached or background processes
+        stdio: ['ignore', 'pipe', 'pipe'],
+      })
+    } catch (spawnError: any) {
+      resolve({
+        code: -1,
+        stdout: '',
+        stderr: `Failed to spawn git: ${spawnError.message}`,
+      })
+      return
+    }
 
     let stdout = ''
     let stderr = ''
     let timedOut = false
-    child.stdout.on('data', (chunk) => {
-      stdout += chunk.toString()
+
+    child.on('error', (err: any) => {
+      stderr += `\n[skill-studio] spawn error: ${err.message}`
     })
-    child.stderr.on('data', (chunk) => {
-      stderr += chunk.toString()
-    })
+
+    if (child.stdout) {
+      child.stdout.on('data', (chunk: any) => {
+        stdout += chunk.toString()
+      })
+    }
+    if (child.stderr) {
+      child.stderr.on('data', (chunk: any) => {
+        stderr += chunk.toString()
+      })
+    }
 
     const timer = setTimeout(() => {
       timedOut = true
@@ -89,15 +109,11 @@ export async function runGit(args: string[], opts: RunOpts = {}): Promise<GitRes
       resolve({
         code: timedOut ? -1 : (code ?? -1),
         stdout,
-        stderr: timedOut ? stderr + '\n[skill-hub] git command timed out' : stderr,
+        stderr: timedOut ? stderr + '\n[skill-studio] git command timed out' : stderr,
       })
     })
-
-    if (opts.input) {
-      child.stdin.write(opts.input)
-    }
-    child.stdin.end()
   })
+
 }
 
 async function dirExists(p: string): Promise<boolean> {
