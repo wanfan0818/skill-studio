@@ -53,9 +53,13 @@ export function startWatcher(callback: WatchCallback): void {
     .on('unlink', (p) => callback({ type: 'unlink', path: p }))
     .on('addDir', (p) => callback({ type: 'addDir', path: p }))
     .on('unlinkDir', (p) => callback({ type: 'unlinkDir', path: p }))
+    .on('error', (err) => {
+      console.warn('[watcher] File watcher error encountered:', err.message || err)
+    })
 }
 
 export function stopWatcher(): void {
+
   if (watcher) {
     void watcher.close().catch((err) => {
       console.warn('Failed to close file watcher:', err)

@@ -17,10 +17,11 @@ if (!fs.existsSync(serverEntry)) {
 }
 
 const child = spawn(process.execPath, [serverEntry], {
-  stdio: 'inherit',
+  stdio: ['ignore', 'inherit', 'inherit'],
   env: process.env,
   cwd: process.cwd(),
 })
+
 
 child.on('exit', (code) => process.exit(code ?? 0))
 

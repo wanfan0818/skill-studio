@@ -1388,6 +1388,7 @@ function formatTime(iso: string): string {
 function SettingsPanel() {
   const [customDir, setCustomDir] = useState('')
   const [githubToken, setGithubToken] = useState('')
+  const [httpProxy, setHttpProxy] = useState('')
   const [rateLimit, setRateLimit] = useState<{ limit: number; remaining: number; reset: number } | null>(null)
   const [loading, setLoading] = useState(true)
   const [saving, setSaving] = useState(false)
@@ -1402,6 +1403,7 @@ function SettingsPanel() {
         if (data.ok && data.settings) {
           setCustomDir(data.settings.customGlobalSkillsDir || '')
           setGithubToken(data.settings.githubToken || '')
+          setHttpProxy(data.settings.httpProxy || '')
         }
       } catch (err: any) {
         setError('加载设置失败')
@@ -1466,6 +1468,7 @@ function SettingsPanel() {
         body: JSON.stringify({ 
           customGlobalSkillsDir: pathVal,
           githubToken: githubToken.trim(),
+          httpProxy: httpProxy.trim(),
         }),
       })
       const data = await res.json()
@@ -1568,6 +1571,31 @@ function SettingsPanel() {
                 )}
               </div>
             )}
+          </div>
+        </div>
+
+        <div className="border-t border-slate-800/80 pt-6">
+          <h3 className="text-base font-semibold text-slate-100 mb-1">网络代理设置</h3>
+          <p className="text-xs text-slate-500 font-medium mb-4">
+            如果遇到连接 GitHub 失败，可在下方配置代理服务器地址。支持 HTTP 和 SOCKS 代理。
+          </p>
+          
+          <div className="space-y-4">
+            <div className="space-y-2">
+              <label className="block text-xs font-semibold text-slate-400">
+                代理服务器地址 (支持 socks5h:// 或 http:// 协议)
+              </label>
+              <input
+                type="text"
+                value={httpProxy}
+                onChange={(e) => setHttpProxy(e.target.value)}
+                placeholder="例如: socks5h://127.0.0.1:7892 或 http://127.0.0.1:7890"
+                className="w-full text-sm placeholder:text-slate-500"
+              />
+              <p className="text-[10px] text-slate-600">
+                提示：留空表示使用系统默认的代理配置。推荐在 macOS 上使用 socks5h 协议以避免 LibreSSL 连接错误。
+              </p>
+            </div>
           </div>
         </div>
 

@@ -20,12 +20,12 @@ import { invalidateCache } from './routes/skills.js'
 import { fullScan } from './scanner/discovery.js'
 import { purgeExpired as purgeExpiredTrash } from './trash/store.js'
 import type { WebSocket } from 'ws'
+import os from 'os'
+import fsPromises from 'fs/promises'
+import { setupProxy } from './sync/proxy.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
-
-import os from 'os'
-import fsPromises from 'fs/promises'
 
 async function migrateLegacyDirectories() {
   const homedir = os.homedir()
@@ -59,6 +59,7 @@ async function migrateLegacyDirectories() {
   }
 }
 
+await setupProxy()
 await migrateLegacyDirectories()
 
 const app = Fastify({ logger: false })
@@ -77,7 +78,19 @@ await app.register(projectRoutes)
 await app.register(updaterRoutes)
 
 // Health check
-app.get('/api/health', async () => ({ status: 'ok' }))
+app.get('/api/health', async () => {
+  const fds: Record<number, string> = {}
+  const fsSync = await import('fs')
+  for (let fd = 0; fd < 100; fd++) {
+    try {
+      fsSync.fstatSync(fd)
+      fds[fd] = 'ok'
+    } catch (err: any) {
+      fds[fd] = err.code
+    }
+  }
+  return { status: 'ok', fds }
+})
 
 // WebSocket for real-time updates
 const wsClients = new Set<WebSocket>()

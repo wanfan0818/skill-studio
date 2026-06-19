@@ -22,6 +22,7 @@ export interface AppSettings {
   enabledAgentIds: string[]
   customGlobalSkillsDir?: string
   githubToken?: string // Added for GitHub API authentication
+  httpProxy?: string // Added for network proxy configuration
 }
 
 export async function readIdeSettingsFull(): Promise<AppSettings> {
@@ -33,7 +34,8 @@ export async function readIdeSettingsFull(): Promise<AppSettings> {
       ? parsed.customGlobalSkillsDir
       : undefined
     const githubToken = typeof parsed.githubToken === 'string' ? parsed.githubToken : undefined
-    return { enabledAgentIds, customGlobalSkillsDir, githubToken }
+    const httpProxy = typeof parsed.httpProxy === 'string' ? parsed.httpProxy : undefined
+    return { enabledAgentIds, customGlobalSkillsDir, githubToken, httpProxy }
   } catch {
     const initialEnabled: string[] = ['claude-code']
     try {
@@ -813,9 +815,10 @@ export async function manageRoutes(app: FastifyInstance) {
       enabledAgentIds?: string[]
       customGlobalSkillsDir?: string
       githubToken?: string
+      httpProxy?: string
     }
   }>('/api/settings', async (req, reply) => {
-    const { enabledAgentIds, customGlobalSkillsDir, githubToken } = req.body
+    const { enabledAgentIds, customGlobalSkillsDir, githubToken, httpProxy } = req.body
     
     let normalizedPath: string | undefined = undefined
     if (customGlobalSkillsDir && customGlobalSkillsDir.trim() !== '') {
@@ -831,7 +834,8 @@ export async function manageRoutes(app: FastifyInstance) {
     const newSettings: AppSettings = {
       enabledAgentIds: Array.isArray(enabledAgentIds) ? enabledAgentIds : oldSettings.enabledAgentIds,
       customGlobalSkillsDir: normalizedPath,
-      githubToken: githubToken !== undefined ? githubToken : oldSettings.githubToken
+      githubToken: githubToken !== undefined ? githubToken : oldSettings.githubToken,
+      httpProxy: httpProxy !== undefined ? httpProxy : oldSettings.httpProxy
     }
 
     if (newSettings.customGlobalSkillsDir && newSettings.customGlobalSkillsDir !== oldSettings.customGlobalSkillsDir) {
@@ -875,6 +879,10 @@ export async function manageRoutes(app: FastifyInstance) {
     }
 
     await writeIdeSettingsFull(newSettings)
+
+    // Dynamic apply proxy settings
+    const { setupProxy } = await import('../sync/proxy.js')
+    await setupProxy()
 
     const { fullScan } = await import('../scanner/discovery.js')
     const scanRes = await fullScan()
