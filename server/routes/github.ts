@@ -13,12 +13,12 @@ import { isInside, isPlainSegment } from '../utils/safe.js'
  * requests may only reference these — a client-supplied `tempPath` used to be
  * passed straight to `fs.rm(..., { recursive: true, force: true })`.
  */
-const cloneDirs = new Map<string, number>()
+const cloneDirs = new Map<string, { createdAt: number; repoName: string }>()
 const CLONE_TTL_MS = 60 * 60 * 1000
 
 function pruneStaleClones() {
   const now = Date.now()
-  for (const [dir, createdAt] of cloneDirs) {
+  for (const [dir, { createdAt }] of cloneDirs) {
     if (now - createdAt > CLONE_TTL_MS) {
       cloneDirs.delete(dir)
       void fs.rm(dir, { recursive: true, force: true }).catch(() => {})
@@ -35,15 +35,51 @@ export async function findOwningCloneDir(p: string): Promise<string | null> {
   return null
 }
 
+/** Last path segment of a clone URL without `.git`, e.g. `owner/handdraw-skill.git` → `handdraw-skill`. */
+export function repoNameFromUrl(url: string): string {
+  return url.replace(/[#?].*$/, '').replace(/\/+$/, '').split(/[/:]/).pop()!.replace(/\.git$/, '')
+}
+
+const usableName = (n: unknown): n is string => isPlainSegment(n) && !n.startsWith('.') && !n.startsWith('skill-hub-git-')
+
+/**
+ * Directory name to install a cloned skill under. A skill in a subdirectory
+ * keeps that directory's name. A repository whose ROOT is the skill would
+ * otherwise get the random temp-dir name (`skill-hub-git-XXXX`), so use the
+ * SKILL.md frontmatter `name`, then the repository name.
+ */
+export async function resolveInstallFolderName(skillPath: string, cloneDir: string, repoName: string): Promise<string | null> {
+  const isRoot = path.resolve(skillPath) === path.resolve(cloneDir)
+  if (!isRoot) {
+    const base = path.basename(skillPath)
+    return usableName(base) ? base : null
+  }
+  for (const file of ['SKILL.md', 'skill.md']) {
+    try {
+      const fmName = (await parseSkillMd(path.join(skillPath, file))).frontmatter?.name
+      if (typeof fmName === 'string' && usableName(fmName.trim())) return fmName.trim()
+      break
+    } catch {}
+  }
+  return usableName(repoName) ? repoName : null
+}
+
 /** Accept `owner/repo`, an https:// git URL, or an scp-style `git@host:owner/repo`. */
-function normalizeCloneUrl(input: string): string | null {
+export function normalizeCloneUrl(input: string): string | null {
   const s = input.trim()
   if (!s || s.startsWith('-') || /[\s\0]/.test(s)) return null
   if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s)) return `https://github.com/${s}.git`
   if (/^git@[A-Za-z0-9.-]+:[A-Za-z0-9_.\/-]+$/.test(s)) return s
   try {
     const u = new URL(s)
-    if (u.protocol === 'https:' || u.protocol === 'http:') return u.toString()
+    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+    // A GitHub page URL (…/owner/repo/tree/main/sub, /blob/…) is what people
+    // copy from the browser; git can only clone the repository root.
+    if (u.hostname === 'github.com' || u.hostname === 'www.github.com') {
+      const [owner, repo] = u.pathname.split('/').filter(Boolean)
+      if (owner && repo) return `https://github.com/${owner}/${repo.replace(/\.git$/, '')}.git`
+    }
+    return u.toString()
   } catch {}
   return null
 }
@@ -104,7 +140,7 @@ export async function githubRoutes(app: FastifyInstance) {
     pruneStaleClones()
     try {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
-      cloneDirs.set(tempDir, Date.now())
+      cloneDirs.set(tempDir, { createdAt: Date.now(), repoName: repoNameFromUrl(cloneUrl) })
 
       await execFileSafe('git', ['clone', '--depth', '1', '--', cloneUrl, tempDir], {
         timeoutMs: 30000,
@@ -114,7 +150,7 @@ export async function githubRoutes(app: FastifyInstance) {
       
       const skills = []
       for (const skillDir of skillDirs) {
-        const skillName = path.basename(skillDir)
+        const skillName = (await resolveInstallFolderName(skillDir, tempDir, repoNameFromUrl(cloneUrl))) ?? path.basename(skillDir)
         let name = skillName
         let description = '无描述'
         let hasFrontmatter = false
@@ -200,10 +236,10 @@ export async function githubRoutes(app: FastifyInstance) {
       destParentDir = path.join(projectPath, '.claude', 'skills')
     }
 
-    const skillFolderName = path.basename(skillPath)
-    if (!isPlainSegment(skillFolderName) || skillFolderName.startsWith('skill-hub-git-')) {
+    const skillFolderName = await resolveInstallFolderName(skillPath, ownedTemp, cloneDirs.get(ownedTemp)!.repoName)
+    if (!skillFolderName) {
       reply.status(400)
-      return { ok: false, error: '无法确定 Skill 目录名' }
+      return { ok: false, error: '无法确定 Skill 目录名：SKILL.md 的 name 与仓库名都不能用作目录名' }
     }
     const destPath = path.join(destParentDir, skillFolderName)
 
