@@ -1,5 +1,5 @@
 import { useState, useMemo } from 'react'
-import { AGENTS, getAgentMeta } from '../agents'
+import { getAgentMeta } from '../agents'
 import type { Skill } from '../hooks/useSkills'
 
 interface SkillProfile {

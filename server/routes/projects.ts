@@ -16,6 +16,7 @@ import { recommendSkills } from '../recommender/engine.js'
 import { invalidateCache } from './skills.js'
 import { syncProjectSkills } from './manage.js'
 import type { SkillProfile, ProjectWithProfile } from '../types.js'
+import { isPlainSegment, writeFileAtomic } from '../utils/safe.js'
 
 const homedir = os.homedir()
 
@@ -47,7 +48,18 @@ async function readProjectProfile(projectPath: string): Promise<SkillProfile | u
  */
 async function writeProjectProfile(projectPath: string, profile: SkillProfile): Promise<void> {
   const profilePath = path.join(projectPath, '.skills-profile.json')
-  await fs.writeFile(profilePath, JSON.stringify(profile, null, 2), 'utf-8')
+  await writeFileAtomic(profilePath, JSON.stringify(profile, null, 2))
+}
+
+/** Project paths from the client must be absolute paths to existing directories. */
+async function isValidProjectDir(p: unknown): Promise<boolean> {
+  if (typeof p !== 'string' || !path.isAbsolute(p)) return false
+  if (path.resolve(p) === path.resolve(homedir) || path.resolve(p) === '/') return false
+  try {
+    return (await fs.stat(p)).isDirectory()
+  } catch {
+    return false
+  }
 }
 
 
@@ -105,22 +117,11 @@ export async function projectRoutes(app: FastifyInstance) {
     const projectsWithProfile: ProjectWithProfile[] = []
 
     for (const p of found) {
-      let profile = await readProjectProfile(p.path)
-      const { linkedCount, status, actualSkills } = await getProjectSkillsStatus(p.path, profile)
-
-      // 如果项目包含物理/软链技能但尚无 Profile，自动构建 Profile 契约
-      if (!profile && actualSkills.length > 0) {
-        profile = {
-          version: 1,
-          name: p.name,
-          description: '自动配置的项目 Profile',
-          skills: actualSkills,
-          targetIde: 'antigravity',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        }
-        await writeProjectProfile(p.path, profile)
-      }
+      // Read-only: a GET must never write into the user's projects. This used
+      // to auto-create a profile with targetIde 'antigravity', which armed the
+      // physical-copy sync mode on projects the user never configured.
+      const profile = await readProjectProfile(p.path)
+      const { linkedCount, status } = await getProjectSkillsStatus(p.path, profile)
 
       projectsWithProfile.push({
         name: profile?.name || p.name,
@@ -165,6 +166,10 @@ export async function projectRoutes(app: FastifyInstance) {
     if (!projectPath || !profile) {
       reply.status(400)
       return { ok: false, error: '缺少必填参数 projectPath 或 profile' }
+    }
+    if (!(await isValidProjectDir(projectPath))) {
+      reply.status(400)
+      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
     }
 
     const existing = await readProjectProfile(projectPath)
@@ -213,6 +218,10 @@ export async function projectRoutes(app: FastifyInstance) {
       reply.status(400)
       return { ok: false, error: '未提供项目路径 projectPath' }
     }
+    if (!(await isValidProjectDir(projectPath))) {
+      reply.status(400)
+      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
+    }
 
     let profile = await readProjectProfile(projectPath)
     if (!profile) {
@@ -232,9 +241,15 @@ export async function projectRoutes(app: FastifyInstance) {
     try {
       const scanRes = await fullScan()
       const globalSkillsMap = new Map(scanRes.skills.map(s => [s.name, s]))
-      await syncProjectSkills(projectPath, globalSkillsMap)
+      const { conflicts } = await syncProjectSkills(projectPath, globalSkillsMap)
       invalidateCache()
-      return { ok: true, message: '项目 Skill 同步成功' }
+      return {
+        ok: true,
+        message: conflicts.length
+          ? `已同步，但有 ${conflicts.length} 个同名真实目录未被覆盖`
+          : '项目 Skill 同步成功',
+        conflicts,
+      }
     } catch (err: any) {
       reply.status(500)
       return { ok: false, error: `同步失败: ${err.message}` }
@@ -249,6 +264,10 @@ export async function projectRoutes(app: FastifyInstance) {
     if (!projectPath) {
       reply.status(400)
       return { ok: false, error: '未提供项目路径 projectPath' }
+    }
+    if (!(await isValidProjectDir(projectPath))) {
+      reply.status(400)
+      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
     }
 
     const profile = await readProjectProfile(projectPath)
@@ -312,6 +331,14 @@ export async function projectRoutes(app: FastifyInstance) {
       reply.status(400)
       return { ok: false, error: '未提供 projectPath 或 skillName' }
     }
+    if (!isPlainSegment(skillName)) {
+      reply.status(400)
+      return { ok: false, error: 'skillName 不合法' }
+    }
+    if (!(await isValidProjectDir(projectPath))) {
+      reply.status(400)
+      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
+    }
 
     let profile = await readProjectProfile(projectPath)
     if (!profile) {
@@ -338,10 +365,10 @@ export async function projectRoutes(app: FastifyInstance) {
     await writeProjectProfile(projectPath, profile)
     const scanRes = await fullScan()
     const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
-    await syncProjectSkills(projectPath, globalSkillsMap)
+    const { conflicts } = await syncProjectSkills(projectPath, globalSkillsMap)
     invalidateCache()
 
-    return { ok: true, profile }
+    return { ok: true, profile, conflicts }
   })
 
   // 以项目为中心的单一 Skill 卸载解绑接口
@@ -352,6 +379,14 @@ export async function projectRoutes(app: FastifyInstance) {
     if (!projectPath || !skillName) {
       reply.status(400)
       return { ok: false, error: '未提供 projectPath 或 skillName' }
+    }
+    if (!isPlainSegment(skillName)) {
+      reply.status(400)
+      return { ok: false, error: 'skillName 不合法' }
+    }
+    if (!(await isValidProjectDir(projectPath))) {
+      reply.status(400)
+      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
     }
 
     let profile = await readProjectProfile(projectPath)
@@ -373,10 +408,10 @@ export async function projectRoutes(app: FastifyInstance) {
 
     const scanRes = await fullScan()
     const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
-    await syncProjectSkills(projectPath, globalSkillsMap)
+    const { conflicts } = await syncProjectSkills(projectPath, globalSkillsMap)
     invalidateCache()
 
-    return { ok: true, profile }
+    return { ok: true, profile, conflicts }
   })
 
   // 删除 / 隐藏项目接口
@@ -387,6 +422,10 @@ export async function projectRoutes(app: FastifyInstance) {
     if (!projectPath) {
       reply.status(400)
       return { ok: false, error: '未提供 projectPath' }
+    }
+    if (!(await isValidProjectDir(projectPath))) {
+      reply.status(400)
+      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
     }
 
     if (purgeFiles) {

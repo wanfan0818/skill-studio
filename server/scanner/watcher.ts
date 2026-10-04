@@ -1,4 +1,4 @@
-import chokidar from 'chokidar'
+import chokidar, { type FSWatcher } from 'chokidar'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
@@ -8,7 +8,7 @@ const homedir = os.homedir()
 
 export type WatchCallback = (event: { type: string; path: string }) => void
 
-let watcher: chokidar.FSWatcher | null = null
+let watcher: FSWatcher | null = null
 const ignoredPathNames = new Set(['node_modules', '.git'])
 
 function isIgnoredPath(filePath: string): boolean {
@@ -62,7 +62,7 @@ export function startWatcher(callback: WatchCallback): void {
     .on('addDir', (p) => callback({ type: 'addDir', path: p }))
     .on('unlinkDir', (p) => callback({ type: 'unlinkDir', path: p }))
     .on('error', (err) => {
-      console.warn('[watcher] File watcher error encountered:', err.message || err)
+      console.warn('[watcher] File watcher error encountered:', (err as any)?.message || err)
     })
 }
 

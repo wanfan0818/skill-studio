@@ -4,7 +4,14 @@ import path from 'path'
 import fs from 'fs/promises'
 import { invalidateCache } from './skills.js'
 import { readIdeSettingsFull, copyDir } from './manage.js'
-import { execSafeCmd } from '../utils/exec.js'
+import { execFileSafe } from '../utils/exec.js'
+import { isPlainSegment, isSafeGithubName } from '../utils/safe.js'
+import { findOwningCloneDir } from './github.js'
+
+/** `owner/repo@skill`, `owner/repo`, or an https URL — never a leading `-`. */
+function isSafeInstallTarget(s: unknown): s is string {
+  return typeof s === 'string' && s.length <= 300 && /^[A-Za-z0-9_.][A-Za-z0-9_.\/@:#+-]*$/.test(s)
+}
 
 function stripAnsi(str: string): string {
   return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
@@ -15,14 +22,18 @@ export async function marketRoutes(app: FastifyInstance) {
   app.get<{
     Querystring: { q: string }
   }>('/api/skills/market/search', async (req) => {
-    const q = req.query.q
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : ''
     if (!q) {
       return { ok: true, items: [] }
     }
+    if (q.length > 100 || q.startsWith('-')) {
+      return { ok: true, items: [], error: '搜索词不合法' }
+    }
 
     try {
-      // Run skills find in temp dir to prevent workspace pollution
-      const { stdout } = await execSafeCmd(`npx -y skills find "${q}"`, {
+      // Run skills find in temp dir to prevent workspace pollution.
+      // Arguments are passed as an array — no shell ever sees `q`.
+      const { stdout } = await execFileSafe('npx', ['-y', 'skills', 'find', q], {
         cwd: os.tmpdir(),
         timeoutMs: 20000, // 20s
       })
@@ -69,9 +80,9 @@ export async function marketRoutes(app: FastifyInstance) {
     Body: { target: string; scope: 'global' | 'project'; projectPath?: string }
   }>('/api/skills/market/install', async (req, reply) => {
     const { target, scope, projectPath } = req.body
-    if (!target) {
+    if (!isSafeInstallTarget(target)) {
       reply.status(400)
-      return { ok: false, error: 'Target is required' }
+      return { ok: false, error: '安装目标格式不正确' }
     }
 
     let installCwd = os.homedir()
@@ -80,11 +91,15 @@ export async function marketRoutes(app: FastifyInstance) {
         reply.status(400)
         return { ok: false, error: 'Project path is required for project scope' }
       }
+      if (!path.isAbsolute(projectPath)) {
+        reply.status(400)
+        return { ok: false, error: 'projectPath 必须是绝对路径' }
+      }
       installCwd = projectPath
     }
 
     try {
-      const { stdout, stderr } = await execSafeCmd(`npx -y skills add "${target}"`, {
+      const { stdout, stderr } = await execFileSafe('npx', ['-y', 'skills', 'add', target], {
         cwd: installCwd,
         timeoutMs: 60000, // 60s for clone
       })
@@ -100,7 +115,7 @@ export async function marketRoutes(app: FastifyInstance) {
           skillFolderName = slashIdx !== -1 ? target.slice(slashIdx + 1) : target
         }
 
-        if (skillFolderName) {
+        if (isPlainSegment(skillFolderName)) {
           const srcPath = path.join(os.homedir(), '.claude', 'skills', skillFolderName)
           const destPath = path.join(settings.customGlobalSkillsDir, skillFolderName)
           try {
@@ -139,23 +154,12 @@ export async function marketRoutes(app: FastifyInstance) {
 
     // Case 1: Local temporary path (cloned from GitHub)
     if (skillPath) {
-      let resolved = path.resolve(skillPath)
-      let tmpDirResolved = path.resolve(os.tmpdir())
-      try {
-        resolved = await fs.realpath(resolved)
-        tmpDirResolved = await fs.realpath(tmpDirResolved)
-      } catch {}
-      const isUnderTemp = 
-        resolved.startsWith(tmpDirResolved) ||
-        resolved.startsWith('/var/folders') ||
-        resolved.startsWith('/private/var/folders') ||
-        resolved.startsWith('/tmp') ||
-        resolved.startsWith('/private/tmp')
-
-      if (!isUnderTemp) {
+      // Only previews inside a clone this server created are allowed.
+      if (!(await findOwningCloneDir(skillPath))) {
         reply.status(403)
         return { error: 'Access denied' }
       }
+      const resolved = await fs.realpath(skillPath).catch(() => path.resolve(skillPath))
 
       const skillMd = path.join(resolved, 'SKILL.md')
       const skillMdLower = path.join(resolved, 'skill.md')
@@ -175,6 +179,11 @@ export async function marketRoutes(app: FastifyInstance) {
 
     // Case 2: Online GitHub repository
     if (repo && name) {
+      const [owner, repoName, ...rest] = repo.split('/')
+      if (rest.length || !isSafeGithubName(owner) || !isSafeGithubName(repoName) || !isPlainSegment(name)) {
+        reply.status(400)
+        return { error: 'Invalid repo or name' }
+      }
       const urls = [
         `https://raw.githubusercontent.com/${repo}/main/${name}/SKILL.md`,
         `https://raw.githubusercontent.com/${repo}/master/${name}/SKILL.md`,

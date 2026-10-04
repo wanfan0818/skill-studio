@@ -24,6 +24,7 @@ import {
 } from '../routes/manage.js'
 import { analyzeSecurity } from './security.js'
 import { checkSkillDrift } from './drift.js'
+import { moveToTrash } from '../trash/store.js'
 
 const homedir = os.homedir()
 
@@ -85,7 +86,7 @@ async function scanSkillDir(
 ): Promise<Skill[]> {
   const skills: Skill[] = []
 
-  let entries: Awaited<ReturnType<typeof fs.readdir>>
+  let entries: import('fs').Dirent[]
   try {
     entries = await fs.readdir(skillDir, { withFileTypes: true })
   } catch {
@@ -322,12 +323,32 @@ export async function purgeProjectSkillsAndProfile(projectPath: string): Promise
     await fs.unlink(profilePath)
   } catch {}
 
-  // 2. Delete agent skill directories in project
+  // 2. Clear agent skill directories in the project. Symlinks are unlinked;
+  //    real skill directories (the user's own work) go to the recycle bin
+  //    instead of the old `rm -rf` of every agent skills dir.
   for (const rel of allAgentProjectRelPaths()) {
     const skillDir = path.join(targetPath, rel)
+    let st
     try {
-      await fs.rm(skillDir, { recursive: true, force: true })
-    } catch {}
+      st = await fs.lstat(skillDir)
+    } catch {
+      continue
+    }
+    if (st.isSymbolicLink()) {
+      await fs.unlink(skillDir).catch(() => {})
+      continue
+    }
+    if (!st.isDirectory()) continue
+    const entries = await fs.readdir(skillDir, { withFileTypes: true }).catch(() => [])
+    for (const entry of entries) {
+      const entryPath = path.join(skillDir, entry.name)
+      try {
+        if (entry.isSymbolicLink()) await fs.unlink(entryPath)
+        else if (entry.isDirectory() && !entry.name.startsWith('.')) await moveToTrash(entryPath, entry.name)
+      } catch (err: any) {
+        console.error(`[purgeProject] Failed to clear ${entryPath}:`, err?.message || err)
+      }
+    }
   }
 }
 
@@ -339,7 +360,7 @@ async function discoverProjectsRecursively(
   const projects: { name: string; path: string }[] = []
   if (currentDepth > maxDepth) return projects
 
-  let entries: Awaited<ReturnType<typeof fs.readdir>>
+  let entries: import('fs').Dirent[]
   try {
     entries = await fs.readdir(dir, { withFileTypes: true })
   } catch {
@@ -574,7 +595,7 @@ async function discoverPluginSkillDirs(): Promise<string[]> {
 
   async function walk(dir: string, depth: number) {
     if (depth > 4) return
-    let entries: Awaited<ReturnType<typeof fs.readdir>>
+    let entries: import('fs').Dirent[]
     try {
       entries = await fs.readdir(dir, { withFileTypes: true })
     } catch {

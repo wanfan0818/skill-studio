@@ -1,5 +1,4 @@
 import Fastify from 'fastify'
-import cors from '@fastify/cors'
 import websocket from '@fastify/websocket'
 import fastifyStatic from '@fastify/static'
 import path from 'path'
@@ -18,12 +17,12 @@ import { updaterRoutes } from './routes/updater.js'
 import { globalRoutes } from './routes/global.js'
 import { startWatcher, stopWatcher, type WatchCallback } from './scanner/watcher.js'
 import { invalidateCache } from './routes/skills.js'
-import { fullScan } from './scanner/discovery.js'
 import { purgeExpired as purgeExpiredTrash } from './trash/store.js'
-import type { WebSocket } from 'ws'
+import type { WebSocket } from '@fastify/websocket'
 import os from 'os'
 import fsPromises from 'fs/promises'
 import { setupProxy } from './sync/proxy.js'
+import { registerGuard, generateSessionToken, persistSessionToken } from './security/guard.js'
 
 const __filename = fileURLToPath(import.meta.url)
 const __dirname = path.dirname(__filename)
@@ -73,7 +72,14 @@ process.on('unhandledRejection', (reason) => {
 
 const app = Fastify({ logger: false })
 
-await app.register(cors, { origin: true })
+// No CORS: the UI is same-origin. The guard rejects foreign Host/Origin
+// headers and requests without this launch's session token.
+const sessionToken = generateSessionToken()
+await persistSessionToken(sessionToken).catch((err) => {
+  console.warn('[skill-studio] Could not persist session token (dev proxy will not authenticate):', err?.message || err)
+})
+registerGuard(app, sessionToken)
+
 await app.register(websocket)
 await app.register(skillRoutes)
 await app.register(manageRoutes)
@@ -88,19 +94,7 @@ await app.register(updaterRoutes)
 await app.register(globalRoutes)
 
 // Health check
-app.get('/api/health', async () => {
-  const fds: Record<number, string> = {}
-  const fsSync = await import('fs')
-  for (let fd = 0; fd < 100; fd++) {
-    try {
-      fsSync.fstatSync(fd)
-      fds[fd] = 'ok'
-    } catch (err: any) {
-      fds[fd] = err.code
-    }
-  }
-  return { status: 'ok', fds }
-})
+app.get('/api/health', async () => ({ status: 'ok' }))
 
 // WebSocket for real-time updates
 const wsClients = new Set<WebSocket>()
@@ -120,18 +114,13 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 const watchCallback: WatchCallback = (event) => {
   if (isSyncingSymlinks) return
   if (debounceTimer) clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(async () => {
+  debounceTimer = setTimeout(() => {
+    // Only invalidate and notify. Drifted physical copies are NOT
+    // auto-overwritten here: the old block never actually ran (it referenced
+    // an unimported function), and silently re-copying on every file event
+    // would discard edits made inside a project's copy. Drift is surfaced in
+    // the UI and resynced on explicit user action.
     invalidateCache()
-    // Auto-resync physical copies for projects with drifted skills (e.g. Antigravity)
-    try {
-      const scanRes = await fullScan()
-      const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
-      for (const proj of scanRes.projects) {
-        if (proj.syncStatus === 'drift' || proj.profile?.targetIde === 'antigravity') {
-          await syncProjectSkills(proj.path, globalSkillsMap).catch(() => {})
-        }
-      }
-    } catch {}
     broadcast({ type: 'change', event })
   }, 500)
 }
@@ -246,6 +235,7 @@ try {
   // Run an initial scan so the banner shows real numbers
   let scanSummary = ''
   try {
+    const { fullScan } = await import('./scanner/discovery.js')
     const result = await fullScan()
     const paths = result.scannedPaths
     const foundPaths = paths.filter((p) => p.count > 0)

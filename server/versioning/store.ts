@@ -57,6 +57,14 @@ function contentHash(content: string): string {
   return crypto.createHash('sha256').update(content).digest('hex').slice(0, 16)
 }
 
+const VERSION_ID_RE = /^[a-z0-9]+-[a-f0-9]{6}$/
+
+/** Version ids are joined into file paths; only accept generated ids. */
+function versionFile(skillPath: string, id: string): string {
+  if (!VERSION_ID_RE.test(id)) throw new Error(`Invalid version id: ${id}`)
+  return path.join(storeDir(skillPath), `${id}.json`)
+}
+
 function storeDir(skillPath: string): string {
   return path.join(STORE_ROOT, skillHash(skillPath))
 }
@@ -71,7 +79,7 @@ async function readDirRecursive(
   currentDir: string,
   result: Record<string, string>,
 ): Promise<void> {
-  let entries: Awaited<ReturnType<typeof fs.readdir>>
+  let entries: import('fs').Dirent[]
   try {
     entries = await fs.readdir(currentDir, { withFileTypes: true })
   } catch {
@@ -229,9 +237,8 @@ export async function getHistory(skillPath: string): Promise<VersionMeta[]> {
  * 获取某个版本的完整内容
  */
 export async function getVersion(skillPath: string, versionId: string): Promise<Version | null> {
-  const dir = storeDir(skillPath)
-  const filePath = path.join(dir, `${versionId}.json`)
   try {
+    const filePath = versionFile(skillPath, versionId)
     const raw = await fs.readFile(filePath, 'utf-8')
     return JSON.parse(raw)
   } catch {
@@ -340,9 +347,8 @@ export async function rollback(skillPath: string, versionId: string): Promise<bo
  * 删除某个版本
  */
 export async function deleteVersion(skillPath: string, versionId: string): Promise<boolean> {
-  const dir = storeDir(skillPath)
   try {
-    await fs.unlink(path.join(dir, `${versionId}.json`))
+    await fs.unlink(versionFile(skillPath, versionId))
     return true
   } catch {
     return false

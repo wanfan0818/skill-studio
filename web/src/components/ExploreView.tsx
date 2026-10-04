@@ -116,7 +116,7 @@ function parseMarkdown(md: string): ReactNode[] {
         {line}
       </p>
     )
-  }).filter((el): el is ReactNode => el !== null)
+  }).filter((el) => el !== null) as ReactNode[]
 }
 
 export function ExploreView({ projects, onInstalled }: ExploreViewProps) {

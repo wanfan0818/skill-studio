@@ -8,14 +8,18 @@ import {
   rollback,
   deleteVersion,
 } from '../versioning/store.js'
-import { invalidateCache } from './skills.js'
+import { invalidateCache, findKnownSkill } from './skills.js'
 
 export async function versionRoutes(app: FastifyInstance) {
   // 创建快照
   app.post<{
     Body: { skillPath: string; skillName: string; message: string }
-  }>('/api/versions/snapshot', async (req) => {
-    const { skillPath, skillName, message } = req.body
+  }>('/api/versions/snapshot', async (req, reply) => {
+    const { skillPath, skillName, message } = req.body ?? ({} as any)
+    if (typeof skillPath !== 'string' || !(await findKnownSkill({ path: skillPath }))) {
+      reply.status(404)
+      return { ok: false, error: '不是已发现的 Skill' }
+    }
     try {
       const meta = await createSnapshot(skillPath, skillName, message, 'manual')
       return { ok: true, version: meta }
@@ -66,8 +70,13 @@ export async function versionRoutes(app: FastifyInstance) {
   // 回滚到指定版本
   app.post<{
     Body: { skillPath: string; versionId: string }
-  }>('/api/versions/rollback', async (req) => {
-    const { skillPath, versionId } = req.body
+  }>('/api/versions/rollback', async (req, reply) => {
+    const { skillPath, versionId } = req.body ?? ({} as any)
+    // Rollback writes files into skillPath — only allow real, discovered skills.
+    if (typeof skillPath !== 'string' || !(await findKnownSkill({ path: skillPath }))) {
+      reply.status(404)
+      return { ok: false, error: '不是已发现的 Skill' }
+    }
     const success = await rollback(skillPath, versionId)
     if (!success) return { ok: false, error: 'Rollback failed' }
     invalidateCache()

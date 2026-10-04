@@ -37,6 +37,18 @@ export interface Skill {
   githubSource?: SkillGithubSource
   isWarehouseSource?: boolean
   isGlobalActive?: boolean
+  security?: {
+    level: 'safe' | 'warning' | 'danger'
+    flags: string[]
+  }
+  linkedIdes?: string[]
+  linkedProjects?: Array<{
+    name: string
+    path: string
+    agentId: string
+    isCopy?: boolean
+    hasDrift?: boolean
+  }>
 }
 
 export interface Stats {

@@ -5,7 +5,48 @@ import fs from 'fs/promises'
 import { parseSkillMd } from '../scanner/parser.js'
 import { invalidateCache } from './skills.js'
 import { readIdeSettingsFull } from './manage.js'
-import { execSafeCmd } from '../utils/exec.js'
+import { execFileSafe } from '../utils/exec.js'
+import { isInside, isPlainSegment } from '../utils/safe.js'
+
+/**
+ * Temp clone directories created by THIS server process. Install / preview
+ * requests may only reference these — a client-supplied `tempPath` used to be
+ * passed straight to `fs.rm(..., { recursive: true, force: true })`.
+ */
+const cloneDirs = new Map<string, number>()
+const CLONE_TTL_MS = 60 * 60 * 1000
+
+function pruneStaleClones() {
+  const now = Date.now()
+  for (const [dir, createdAt] of cloneDirs) {
+    if (now - createdAt > CLONE_TTL_MS) {
+      cloneDirs.delete(dir)
+      void fs.rm(dir, { recursive: true, force: true }).catch(() => {})
+    }
+  }
+}
+
+/** Resolve `p` to the registered clone dir that contains it, or null. */
+export async function findOwningCloneDir(p: string): Promise<string | null> {
+  if (typeof p !== 'string' || !p) return null
+  for (const dir of cloneDirs.keys()) {
+    if (await isInside(p, dir)) return dir
+  }
+  return null
+}
+
+/** Accept `owner/repo`, an https:// git URL, or an scp-style `git@host:owner/repo`. */
+function normalizeCloneUrl(input: string): string | null {
+  const s = input.trim()
+  if (!s || s.startsWith('-') || /[\s\0]/.test(s)) return null
+  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s)) return `https://github.com/${s}.git`
+  if (/^git@[A-Za-z0-9.-]+:[A-Za-z0-9_.\/-]+$/.test(s)) return s
+  try {
+    const u = new URL(s)
+    if (u.protocol === 'https:' || u.protocol === 'http:') return u.toString()
+  } catch {}
+  return null
+}
 
 async function findSkillsInDir(dir: string, depth: number = 0, maxDepth: number = 5): Promise<string[]> {
   if (depth > maxDepth) return []
@@ -54,16 +95,19 @@ export async function githubRoutes(app: FastifyInstance) {
       return { ok: false, error: 'repoUrl is required' }
     }
 
-    let cloneUrl = repoUrl.trim()
-    if (!cloneUrl.startsWith('http://') && !cloneUrl.startsWith('https://') && !cloneUrl.startsWith('git@')) {
-      cloneUrl = `https://github.com/${cloneUrl}.git`
+    const cloneUrl = typeof repoUrl === 'string' ? normalizeCloneUrl(repoUrl) : null
+    if (!cloneUrl) {
+      reply.status(400)
+      return { ok: false, error: '仓库地址格式不正确（支持 owner/repo、https:// 或 git@host:owner/repo）' }
     }
 
+    pruneStaleClones()
     try {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
-      
-      await execSafeCmd(`git clone --depth 1 "${cloneUrl}" "${tempDir}"`, {
-        timeoutMs: 30000
+      cloneDirs.set(tempDir, Date.now())
+
+      await execFileSafe('git', ['clone', '--depth', '1', '--', cloneUrl, tempDir], {
+        timeoutMs: 30000,
       })
 
       const skillDirs = await findSkillsInDir(tempDir)
@@ -133,6 +177,13 @@ export async function githubRoutes(app: FastifyInstance) {
       return { ok: false, error: 'tempPath and skillPath are required' }
     }
 
+    // Both paths must belong to a clone this server created.
+    const ownedTemp = cloneDirs.has(tempPath) ? tempPath : null
+    if (!ownedTemp || !(await isInside(skillPath, ownedTemp))) {
+      reply.status(403)
+      return { ok: false, error: '未知的临时克隆目录，请重新克隆仓库' }
+    }
+
     let destParentDir = ''
     if (scope === 'global') {
       const settings = await readIdeSettingsFull()
@@ -142,13 +193,27 @@ export async function githubRoutes(app: FastifyInstance) {
         reply.status(400)
         return { ok: false, error: 'projectPath is required for project scope' }
       }
+      if (!path.isAbsolute(projectPath)) {
+        reply.status(400)
+        return { ok: false, error: 'projectPath 必须是绝对路径' }
+      }
       destParentDir = path.join(projectPath, '.claude', 'skills')
     }
 
-    try {
-      const skillFolderName = path.basename(skillPath)
-      const destPath = path.join(destParentDir, skillFolderName)
+    const skillFolderName = path.basename(skillPath)
+    if (!isPlainSegment(skillFolderName) || skillFolderName.startsWith('skill-hub-git-')) {
+      reply.status(400)
+      return { ok: false, error: '无法确定 Skill 目录名' }
+    }
+    const destPath = path.join(destParentDir, skillFolderName)
 
+    try {
+      await fs.access(destPath)
+      reply.status(409)
+      return { ok: false, error: `目标位置已存在同名 Skill: ${destPath}` }
+    } catch {}
+
+    try {
       await fs.mkdir(destParentDir, { recursive: true })
       await fs.cp(skillPath, destPath, { recursive: true })
 
@@ -158,9 +223,8 @@ export async function githubRoutes(app: FastifyInstance) {
       reply.status(500)
       return { ok: false, error: `拷贝技能目录失败: ${err.message}` }
     } finally {
-      try {
-        await fs.rm(tempPath, { recursive: true, force: true })
-      } catch {}
+      cloneDirs.delete(ownedTemp)
+      await fs.rm(ownedTemp, { recursive: true, force: true }).catch(() => {})
     }
   })
 }

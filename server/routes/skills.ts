@@ -4,7 +4,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import { fullScan } from '../scanner/discovery.js'
 import { AGENTS } from '../scanner/agents.js'
-import type { ScanResult } from '../types.js'
+import type { ScanResult, Skill } from '../types.js'
 
 let cachedResult: ScanResult | null = null
 
@@ -146,6 +146,39 @@ export async function skillRoutes(app: FastifyInstance) {
       return reply.status(500).send({ error: `无法写入标头: ${err.message}` })
     }
   })
+}
+
+async function samePath(a: string, b: string): Promise<boolean> {
+  if (path.resolve(a) === path.resolve(b)) return true
+  try {
+    return (await fs.realpath(a)) === (await fs.realpath(b))
+  } catch {
+    return false
+  }
+}
+
+/**
+ * Resolve a skill the scanner actually discovered, by id or by its path /
+ * realPath. Mutating endpoints use this instead of trusting a client-supplied
+ * path, so they can only ever touch real skill directories.
+ * Retries once with a fresh scan in case the cache is stale.
+ */
+export async function findKnownSkill(match: { id?: string; path?: string }): Promise<Skill | undefined> {
+  const lookup = async (skills: Skill[]) => {
+    if (match.id) return skills.find((s) => s.id === match.id)
+    if (match.path && typeof match.path === 'string') {
+      for (const s of skills) {
+        if ((await samePath(s.path, match.path)) || (await samePath(s.realPath, match.path))) return s
+      }
+    }
+    return undefined
+  }
+  if (cachedResult) {
+    const hit = await lookup(cachedResult.skills)
+    if (hit) return hit
+  }
+  cachedResult = await fullScan()
+  return lookup(cachedResult.skills)
 }
 
 export function invalidateCache() {

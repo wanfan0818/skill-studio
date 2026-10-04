@@ -1388,6 +1388,8 @@ function formatTime(iso: string): string {
 function SettingsPanel() {
   const [customDir, setCustomDir] = useState('')
   const [githubToken, setGithubToken] = useState('')
+  const [hasGithubToken, setHasGithubToken] = useState(false)
+  const [clearGithubToken, setClearGithubToken] = useState(false)
   const [httpProxy, setHttpProxy] = useState('')
   const [rateLimit, setRateLimit] = useState<{ limit: number; remaining: number; reset: number } | null>(null)
   const [loading, setLoading] = useState(true)
@@ -1402,7 +1404,8 @@ function SettingsPanel() {
         const data = await res.json()
         if (data.ok && data.settings) {
           setCustomDir(data.settings.customGlobalSkillsDir || '')
-          setGithubToken(data.settings.githubToken || '')
+          // The server never sends the token back — only whether one is stored.
+          setHasGithubToken(!!data.settings.hasGithubToken)
           setHttpProxy(data.settings.httpProxy || '')
         }
       } catch (err: any) {
@@ -1467,13 +1470,18 @@ function SettingsPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ 
           customGlobalSkillsDir: pathVal,
-          githubToken: githubToken.trim(),
+          // Empty means "keep the stored token"; clearing is explicit.
+          githubToken: githubToken.trim() || undefined,
+          clearGithubToken: clearGithubToken || undefined,
           httpProxy: httpProxy.trim(),
         }),
       })
       const data = await res.json()
       if (data.ok) {
         setSuccess(true)
+        setHasGithubToken(!!data.settings?.hasGithubToken)
+        setGithubToken('')
+        setClearGithubToken(false)
         if (pathChanged) {
           alert('配置保存并迁移成功！页面即将刷新以重新扫描技能。')
           window.location.reload()
@@ -1546,10 +1554,26 @@ function SettingsPanel() {
               <input
                 type="password"
                 value={githubToken}
-                onChange={(e) => setGithubToken(e.target.value)}
-                placeholder="例如: ghp_xxxxxxxxxxxxxxxxxxxx"
+                onChange={(e) => {
+                  setGithubToken(e.target.value)
+                  if (e.target.value) setClearGithubToken(false)
+                }}
+                placeholder={hasGithubToken ? '已保存令牌（留空则保持不变，输入新值则替换）' : '例如: ghp_xxxxxxxxxxxxxxxxxxxx'}
                 className="w-full text-sm placeholder:text-slate-500"
               />
+              {hasGithubToken && (
+                <label className="flex items-center gap-2 text-[11px] text-slate-500">
+                  <input
+                    type="checkbox"
+                    checked={clearGithubToken}
+                    onChange={(e) => {
+                      setClearGithubToken(e.target.checked)
+                      if (e.target.checked) setGithubToken('')
+                    }}
+                  />
+                  保存时清除已保存的令牌
+                </label>
+              )}
               <p className="text-[10px] text-slate-600">
                 提示：令牌只需具备公共仓读取权限（或无需特殊权限），用于访问公开 API。
               </p>
