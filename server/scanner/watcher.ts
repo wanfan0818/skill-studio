@@ -1,8 +1,8 @@
 import chokidar, { type FSWatcher } from 'chokidar'
 import fs from 'fs'
-import path from 'path'
 import os from 'os'
 import { allAgentGlobalAbsPaths } from './agents.js'
+import { getWarehouseDirs } from '../settings.js'
 
 const homedir = os.homedir()
 
@@ -15,21 +15,27 @@ function isIgnoredPath(filePath: string): boolean {
   return filePath.split(/[\\/]+/).some((part) => ignoredPathNames.has(part))
 }
 
-export function startWatcher(callback: WatchCallback): void {
+let starting = false
+
+export async function startWatcher(callback: WatchCallback): Promise<void> {
+  if (watcher || starting) return
+  starting = true
+
+  // Configured warehouses (not hard-coded personal paths) + every agent's
+  // global skills directory.
+  let warehouseDirs: string[] = []
+  try {
+    warehouseDirs = await getWarehouseDirs()
+  } catch (err: any) {
+    console.warn('[watcher] Could not read warehouse settings:', err?.message || err)
+  }
+  starting = false
   if (watcher) return
 
-  const warehouseDirs = [
-    path.join(homedir, 'Documents', 'wanfan-知识库', '004-Resource', '002-skills'),
-    path.join(homedir, 'Documents', 'wanfan-知识库', '004-Resource', 'skills'),
-    path.join(homedir, '.agents', 'skills'),
-    path.join(homedir, '.gemini', 'antigravity', 'skills'),
-  ]
-
-  const watchPaths = [
+  const watchPaths = Array.from(new Set([
     ...allAgentGlobalAbsPaths(homedir).map((x) => x.path),
     ...warehouseDirs,
-    path.join(homedir, '.newmax', 'skills'),
-  ]
+  ]))
 
   // Only watch paths that exist
   const validPaths = watchPaths.filter((p) => {

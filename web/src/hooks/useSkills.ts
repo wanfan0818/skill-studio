@@ -1,76 +1,20 @@
 import { useState, useCallback } from 'react'
-import type { AgentId } from '../agents'
 import type { HealthReport, MergeSuggestion, CategorySummary } from '../components/HealthPanel'
 
-export interface SkillGithubSource {
-  owner: string
-  repo: string
-  branch: string
-  subPath: string
-  installedCommit?: string
-  installedAt?: string
-  lastChecked?: string
-  updateAvailable?: boolean
-  latestCommit?: string
-}
+// Wire types come from the server so both sides stay in sync.
+import type {
+  SkillDTO,
+  SkillGithubSource as ServerSkillGithubSource,
+  ScanStats,
+  Project as ServerProject,
+  ConflictGroupDTO,
+} from '../../../server/types'
 
-export interface Skill {
-  id: string
-  name: string
-  description: string
-  scope: 'global' | 'project' | 'plugin'
-  agent: AgentId
-  source: 'local' | 'newmax' | 'agents' | 'symlink' | 'unknown'
-  category: string
-  path: string
-  realPath: string
-  symlinkTarget?: string
-  projectName?: string
-  projectPath?: string
-  frontmatter: Record<string, any>
-  /** Only present on the detail endpoint; list payloads omit it. */
-  content?: string
-  files: string[]
-  enabled: boolean
-  hasConflict: boolean
-  hasDrift?: boolean
-  lastModified: string
-  githubSource?: SkillGithubSource
-  isWarehouseSource?: boolean
-  isGlobalActive?: boolean
-  security?: {
-    level: 'safe' | 'warning' | 'danger'
-    flags: string[]
-  }
-  linkedIdes?: string[]
-  linkedProjects?: Array<{
-    name: string
-    path: string
-    agentId: string
-    isCopy?: boolean
-    hasDrift?: boolean
-  }>
-}
-
-export interface Stats {
-  total: number
-  global: number
-  project: number
-  bySource: Record<string, number>
-  byAgent: Record<string, number>
-  byCategory: Record<string, number>
-}
-
-export interface Project {
-  name: string
-  path: string
-  skillCount: number
-}
-
-export interface ConflictGroup {
-  name: string
-  skills: Skill[]
-}
+export type Skill = SkillDTO
+export type SkillGithubSource = ServerSkillGithubSource
+export type Stats = ScanStats
+export type Project = ServerProject
+export type ConflictGroup = ConflictGroupDTO
 
 export function useSkills() {
   const [allSkills, setAllSkills] = useState<Skill[]>([])

@@ -135,7 +135,7 @@ app.register(async function (fastify) {
 
     if (shouldStartWatcher) {
       invalidateCache()
-      startWatcher(watchCallback)
+      void startWatcher(watchCallback)
     }
 
     socket.on('close', () => {
@@ -222,9 +222,11 @@ try {
   const actualPort = await listenWithRetry(basePort)
   const url = `http://localhost:${actualPort}`
 
-  // Write port to .port.tmp for front-end proxying
+  // Record the port for the Vite dev proxy — in the config dir, not the
+  // user's current working directory.
   try {
-    fs.writeFileSync(path.resolve(process.cwd(), '.port.tmp'), actualPort.toString(), 'utf-8')
+    fs.mkdirSync(path.join(os.homedir(), '.config', 'skill-studio'), { recursive: true })
+    fs.writeFileSync(path.join(os.homedir(), '.config', 'skill-studio', 'port'), actualPort.toString(), 'utf-8')
   } catch {}
 
   // Purge expired trash entries on startup (best-effort, non-blocking failures)

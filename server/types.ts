@@ -140,3 +140,19 @@ export interface ProjectWithProfile extends Project {
   profileSkillCount: number
   syncStatus: 'synced' | 'drift' | 'no-profile'
 }
+
+// ---- Wire types shared with the web client (web/src imports these with
+// `import type`, so the two sides can no longer drift apart silently). ----
+
+/** A skill as sent in list payloads: the SKILL.md text is omitted and is
+ *  fetched on demand from GET /api/skills/:id. */
+export type SkillDTO = Omit<Skill, 'content'> & { content?: string }
+
+export interface ConflictGroupDTO {
+  name: string
+  skills: SkillDTO[]
+}
+
+export type ScanStats = ScanResult['stats']
+
+export type { AgentId }

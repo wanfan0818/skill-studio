@@ -11,6 +11,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
 import crypto from 'crypto'
+import { copyDir } from '../utils/fs.js'
 
 function trashRoot(): string {
   // Read HOME lazily so tests can override process.env.HOME between calls.
@@ -359,19 +360,3 @@ export async function purgeExpired(): Promise<number> {
   return removed
 }
 
-async function copyDir(src: string, dest: string): Promise<void> {
-  await fs.mkdir(dest, { recursive: true })
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  for (const entry of entries) {
-    const s = path.join(src, entry.name)
-    const d = path.join(dest, entry.name)
-    if (entry.isSymbolicLink()) {
-      const target = await fs.readlink(s)
-      await fs.symlink(target, d)
-    } else if (entry.isDirectory()) {
-      await copyDir(s, d)
-    } else if (entry.isFile()) {
-      await fs.copyFile(s, d)
-    }
-  }
-}

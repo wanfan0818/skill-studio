@@ -4,6 +4,7 @@ import fs from 'fs/promises'
 import type { SkillGithubSource } from '../types.js'
 import { writeSkillSource } from './source.js'
 import { execFileSafe } from '../utils/exec.js'
+import { copyDir } from '../utils/fs.js'
 import { isSafeGithubName, isSafeGitRef, isSafeSubPath } from '../utils/safe.js'
 
 function git(args: string[]) {
@@ -62,7 +63,7 @@ export async function updateSkillFromGithub(
     }
 
     // Overwrite the files
-    await copyDirectoryContents(srcDir, skillRealPath)
+    await copyDir(srcDir, skillRealPath, { skip: (name) => name === '.git' || name === '.skill-source' })
 
     // Update .skill-source file with updated commit
     const updatedSource: SkillGithubSource = {
@@ -81,22 +82,3 @@ export async function updateSkillFromGithub(
   }
 }
 
-async function copyDirectoryContents(src: string, dest: string): Promise<void> {
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  await fs.mkdir(dest, { recursive: true })
-
-  for (const entry of entries) {
-    if (entry.name === '.git' || entry.name === '.skill-source') {
-      continue
-    }
-
-    const srcPath = path.join(src, entry.name)
-    const destPath = path.join(dest, entry.name)
-
-    if (entry.isDirectory()) {
-      await copyDirectoryContents(srcPath, destPath)
-    } else {
-      await fs.copyFile(srcPath, destPath)
-    }
-  }
-}

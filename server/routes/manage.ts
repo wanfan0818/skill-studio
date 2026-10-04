@@ -7,6 +7,7 @@ import { invalidateCache, findKnownSkill } from './skills.js'
 import { isInside, isPlainSegment, readJsonFile, writeFileAtomic } from '../utils/safe.js'
 import { createSnapshot } from '../versioning/store.js'
 import { moveToTrash } from '../trash/store.js'
+import { copyDir } from '../utils/fs.js'
 import { AGENTS, agentGlobalPaths } from '../scanner/agents.js'
 import { discoverProjects, fullScan } from '../scanner/discovery.js'
 import { readIdeSettingsFull, writeIdeSettingsFull, getWarehouseDirs, type AppSettings } from '../settings.js'
@@ -61,19 +62,6 @@ async function writeSettings(settings: any): Promise<void> {
 }
 
 
-async function copyDirRecursive(src: string, dest: string) {
-  await fs.mkdir(dest, { recursive: true })
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name)
-    const destPath = path.join(dest, entry.name)
-    if (entry.isDirectory()) {
-      await copyDirRecursive(srcPath, destPath)
-    } else {
-      await fs.copyFile(srcPath, destPath)
-    }
-  }
-}
 
 /** A physical copy Skill Studio materialized (Antigravity mode) carries this marker. */
 async function isManagedCopy(dir: string): Promise<boolean> {
@@ -193,7 +181,7 @@ export async function syncProjectSkills(
           } else if (lstat) {
             await fs.rm(targetLinkPath, { recursive: true, force: true }) // managed copy only
           }
-          await copyDirRecursive(resolvedRealPath, targetLinkPath)
+          await copyDir(resolvedRealPath, targetLinkPath)
 
           const sourceMarkerFile = path.join(targetLinkPath, '.skill-source')
           let markerData: any = {}
@@ -944,16 +932,3 @@ export async function manageRoutes(app: FastifyInstance) {
   })
 }
 
-export async function copyDir(src: string, dest: string): Promise<void> {
-  await fs.mkdir(dest, { recursive: true })
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  for (const entry of entries) {
-    const srcPath = path.join(src, entry.name)
-    const destPath = path.join(dest, entry.name)
-    if (entry.isDirectory()) {
-      await copyDir(srcPath, destPath)
-    } else {
-      await fs.copyFile(srcPath, destPath)
-    }
-  }
-}

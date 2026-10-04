@@ -3,8 +3,10 @@ import { useEffect, useRef, useCallback } from 'react'
 export function useWebSocket(onMessage: (data: any) => void) {
   const wsRef = useRef<WebSocket | null>(null)
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined)
+  const disposed = useRef(false)
 
   const connect = useCallback(() => {
+    if (disposed.current) return
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
     const ws = new WebSocket(`${protocol}//${window.location.host}/ws`)
 
@@ -20,6 +22,9 @@ export function useWebSocket(onMessage: (data: any) => void) {
     }
 
     ws.onclose = () => {
+      // Closing on unmount must not schedule a reconnect (it used to leak a
+      // socket per remount, e.g. twice under React StrictMode).
+      if (disposed.current) return
       console.log('[WS] Disconnected, reconnecting in 3s...')
       reconnectTimer.current = setTimeout(connect, 3000)
     }
@@ -32,8 +37,10 @@ export function useWebSocket(onMessage: (data: any) => void) {
   }, [onMessage])
 
   useEffect(() => {
+    disposed.current = false
     connect()
     return () => {
+      disposed.current = true
       if (reconnectTimer.current) clearTimeout(reconnectTimer.current)
       wsRef.current?.close()
     }

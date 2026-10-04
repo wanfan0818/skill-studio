@@ -8,6 +8,7 @@ import { getWarehouseDirs } from '../settings.js'
 import { isPlainSegment } from '../utils/safe.js'
 import { readDistribution, desiredNames, type DistributionState } from './state.js'
 import { withWriteLock } from './lock.js'
+import { mapLimit } from '../utils/concurrency.js'
 
 /**
  * plan → apply reconciler for global skill distribution.
@@ -96,19 +97,6 @@ async function realOr(p: string, fallback: string | null = null): Promise<string
   }
 }
 
-async function mapLimit<T, R>(items: T[], limit: number, fn: (t: T) => Promise<R>): Promise<R[]> {
-  const out: R[] = new Array(items.length)
-  let i = 0
-  await Promise.all(
-    Array.from({ length: Math.min(limit, items.length) }, async () => {
-      while (i < items.length) {
-        const idx = i++
-        out[idx] = await fn(items[idx])
-      }
-    }),
-  )
-  return out
-}
 
 export async function listSources(warehouses: string[], warnings: string[]): Promise<Map<string, SourceSkill>> {
   const sources = new Map<string, SourceSkill>()

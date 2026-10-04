@@ -5,13 +5,10 @@ import path from 'path'
 import fs from 'fs'
 import os from 'os'
 
-// Read dynamic port from .port.tmp if it exists
+// Backend port written by the server at startup (it retries 3456–3460).
 let backendPort = '3456'
 try {
-  const tmpPath = path.resolve(__dirname, '.port.tmp')
-  if (fs.existsSync(tmpPath)) {
-    backendPort = fs.readFileSync(tmpPath, 'utf-8').trim()
-  }
+  backendPort = fs.readFileSync(path.join(os.homedir(), '.config', 'skill-studio', 'port'), 'utf-8').trim() || backendPort
 } catch {}
 
 // Session token written by the backend at startup (dev mode only: in
