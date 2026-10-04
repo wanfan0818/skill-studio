@@ -17,7 +17,8 @@
 - **边框 500 (Border-500)**: `#444444`。悬停状态的边框。
 - **次要文字 (Gray-900)**: `#888888`。二级字色、辅助说明。
 - **首要文字 (Gray-1000)**: `#ffffff`。核心标签、加粗重点与主要文本。
-- **翡翠绿 (Emerald Health)**: `#0070f3` (Geist 专用高亮蓝，表示正常或状态就绪) 以及绿标状态。
+- **Geist 蓝 (Geist Blue)**: `#0070f3`。高亮与「就绪 / 正常」状态；成功类状态另用 Tailwind emerald 系绿色。
+- **琥珀 (Amber)**: `#f5a623`。警告、待处理（如「待分发」徽章）。
 - **熔岩红 (Lava Danger)**: `#e00000`。用于高危安全漏洞提示、删除按钮等。
 
 ---
@@ -43,3 +44,12 @@
 ## 5. Layout Principles
 - **极致呼吸感 (Spacious Whitespace)**：布局在横向和纵向间距上均使用 `space-y-6` / `gap-6`，保证复杂的技术数据和 Skill 卡片之间有清晰可辨的结构。
 - **极细边框线分割 (Divider Rules)**：卡片内与模块间的分割使用极细线，拒绝粗厚线条，维持页面的精致度。
+
+---
+
+## 6. 实现方式（改样式前必读）
+
+- 颜色以 CSS 变量定义在 `web/src/index.css`：`:root` 是暗色（默认），`html.light` 是亮色主题，由 `useTheme` 切换并存于 localStorage。
+- **Tailwind 的 `slate-*` / `indigo-*` 被重映射到 Geist 变量**（见 `index.css` 的 `@theme`）。因此组件里写 `bg-slate-900`，实际是 Geist `--geist-bg-200`；`bg-indigo-600` 是首要按钮的纯白（暗色）/纯黑（亮色）。
+  新组件请继续使用 `slate-*` / `indigo-*` 类名，才能自动适配两套主题；直接写十六进制色值会绕过主题。
+- 状态色直接使用 Tailwind 的 `emerald` / `amber` / `rose` / `red` 系（未重映射）。
