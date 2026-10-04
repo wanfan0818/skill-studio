@@ -32,8 +32,11 @@ export interface Skill {
   files: string[]
   enabled: boolean
   hasConflict: boolean
+  hasDrift?: boolean
   lastModified: string
   githubSource?: SkillGithubSource
+  isWarehouseSource?: boolean
+  isGlobalActive?: boolean
 }
 
 export interface Stats {
@@ -91,9 +94,12 @@ export function useSkills() {
   }, [])
 
   const filterSkills = useCallback(
-    (opts: { scope?: string; source?: string; agent?: string; category?: string; search?: string; project?: string; conflictOnly?: boolean }) => {
+    (opts: { scope?: string; source?: string; agent?: string; category?: string; search?: string; project?: string; conflictOnly?: boolean; globalOnly?: boolean }) => {
       let filtered = [...allSkills]
 
+      if (opts.globalOnly) {
+        filtered = filtered.filter((s) => s.isGlobalActive || s.scope === 'global')
+      }
       if (opts.scope && opts.scope !== 'all') {
         filtered = filtered.filter((s) => s.scope === opts.scope)
       }

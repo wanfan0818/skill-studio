@@ -1,14 +1,11 @@
 import type { FastifyInstance } from 'fastify'
-import { exec } from 'child_process'
-import { promisify } from 'util'
 import os from 'os'
 import path from 'path'
 import fs from 'fs/promises'
 import { parseSkillMd } from '../scanner/parser.js'
 import { invalidateCache } from './skills.js'
 import { readIdeSettingsFull } from './manage.js'
-
-const execAsync = promisify(exec)
+import { execSafeCmd } from '../utils/exec.js'
 
 async function findSkillsInDir(dir: string, depth: number = 0, maxDepth: number = 5): Promise<string[]> {
   if (depth > maxDepth) return []
@@ -65,9 +62,8 @@ export async function githubRoutes(app: FastifyInstance) {
     try {
       const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
       
-      await execAsync(`git clone --depth 1 "${cloneUrl}" "${tempDir}"`, {
-        timeout: 30000,
-        stdio: ['ignore', 'pipe', 'pipe']
+      await execSafeCmd(`git clone --depth 1 "${cloneUrl}" "${tempDir}"`, {
+        timeoutMs: 30000
       })
 
       const skillDirs = await findSkillsInDir(tempDir)

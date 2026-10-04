@@ -16,6 +16,7 @@ import { Footer } from './components/Footer'
 import { ExploreView } from './components/ExploreView'
 import { ProjectsView } from './components/ProjectsView'
 import { UpdaterPanel } from './components/UpdaterPanel'
+import { GlobalSkillsModal } from './components/GlobalSkillsModal'
 import type { Skill } from './hooks/useSkills'
 import { AGENT_ORDER, AGENT_META } from './agents'
 
@@ -46,6 +47,7 @@ function App() {
   const [conflictRowBusy, setConflictRowBusy] = useState<Set<string>>(new Set())
   const [aboutOpen, setAboutOpen] = useState<boolean>(false)
   const [updaterOpen, setUpdaterOpen] = useState<boolean>(false)
+  const [globalModalOpen, setGlobalModalOpen] = useState<boolean>(false)
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
     try {
       return localStorage.getItem('skill-hub:sidebar') !== 'closed'
@@ -356,6 +358,16 @@ function App() {
                         <path d="M21 12.79A9 9 0 1 1 11.21 3 7 7 0 0 0 21 12.79z" />
                       </svg>
                     )}
+                  </button>
+
+                  {/* Global Skill Center Button */}
+                  <button
+                    onClick={() => setGlobalModalOpen(true)}
+                    className="px-2.5 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-xs font-semibold transition-all flex items-center gap-1 cursor-pointer"
+                    title="配置全局 Skill，在全系统 IDE 中全局全域生效"
+                  >
+                    <span>🌐</span>
+                    <span>全局通用 Skill</span>
                   </button>
 
                   {/* Updater Button */}
@@ -701,6 +713,16 @@ function App() {
         onClose={() => setUpdaterOpen(false)}
         onUpdated={scan}
       />
+
+      {globalModalOpen && (
+        <GlobalSkillsModal
+          allSkills={allSkills}
+          onClose={(refreshed) => {
+            setGlobalModalOpen(false)
+            if (refreshed) scan()
+          }}
+        />
+      )}
 
       {/* Bulk delete confirm (Global) */}
       {bulkDeleteConfirm && (

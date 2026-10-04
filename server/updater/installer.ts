@@ -1,15 +1,12 @@
-import { exec } from 'child_process'
-import { promisify } from 'util'
 import os from 'os'
 import path from 'path'
 import fs from 'fs/promises'
 import type { SkillGithubSource } from '../types.js'
 import { writeSkillSource } from './source.js'
-
-const execAsync = promisify(exec)
+import { execSafeCmd } from '../utils/exec.js'
 
 async function execSafe(cmd: string): Promise<{ stdout: string; stderr: string }> {
-  return execAsync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] })
+  return execSafeCmd(cmd)
 }
 
 export async function updateSkillFromGithub(

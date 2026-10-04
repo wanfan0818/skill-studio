@@ -92,7 +92,11 @@ import os from 'os'
 
 export async function writeSkillSource(skillRealPath: string, source: SkillGithubSource): Promise<void> {
   const sourceFilePath = path.join(skillRealPath, '.skill-source')
-  await fs.writeFile(sourceFilePath, JSON.stringify(source, null, 2), 'utf-8')
+  try {
+    await fs.writeFile(sourceFilePath, JSON.stringify(source, null, 2), 'utf-8')
+  } catch (err: any) {
+    // Quietly ignore EPERM / read-only filesystem errors for master warehouses
+  }
 }
 
 export async function findSourceInManifests(

@@ -15,6 +15,7 @@ import { marketRoutes } from './routes/market.js'
 import { githubRoutes } from './routes/github.js'
 import { projectRoutes } from './routes/projects.js'
 import { updaterRoutes } from './routes/updater.js'
+import { globalRoutes } from './routes/global.js'
 import { startWatcher, stopWatcher, type WatchCallback } from './scanner/watcher.js'
 import { invalidateCache } from './routes/skills.js'
 import { fullScan } from './scanner/discovery.js'
@@ -62,6 +63,14 @@ async function migrateLegacyDirectories() {
 await setupProxy()
 await migrateLegacyDirectories()
 
+process.on('uncaughtException', (err) => {
+  console.error('[skill-studio] Uncaught Exception caught (process guarded):', err)
+})
+
+process.on('unhandledRejection', (reason) => {
+  console.error('[skill-studio] Unhandled Rejection caught (process guarded):', reason)
+})
+
 const app = Fastify({ logger: false })
 
 await app.register(cors, { origin: true })
@@ -76,6 +85,7 @@ await app.register(marketRoutes)
 await app.register(githubRoutes)
 await app.register(projectRoutes)
 await app.register(updaterRoutes)
+await app.register(globalRoutes)
 
 // Health check
 app.get('/api/health', async () => {
@@ -110,8 +120,18 @@ let debounceTimer: ReturnType<typeof setTimeout> | null = null
 const watchCallback: WatchCallback = (event) => {
   if (isSyncingSymlinks) return
   if (debounceTimer) clearTimeout(debounceTimer)
-  debounceTimer = setTimeout(() => {
+  debounceTimer = setTimeout(async () => {
     invalidateCache()
+    // Auto-resync physical copies for projects with drifted skills (e.g. Antigravity)
+    try {
+      const scanRes = await fullScan()
+      const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
+      for (const proj of scanRes.projects) {
+        if (proj.syncStatus === 'drift' || proj.profile?.targetIde === 'antigravity') {
+          await syncProjectSkills(proj.path, globalSkillsMap).catch(() => {})
+        }
+      }
+    } catch {}
     broadcast({ type: 'change', event })
   }, 500)
 }

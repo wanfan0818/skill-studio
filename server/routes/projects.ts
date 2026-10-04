@@ -2,10 +2,19 @@ import type { FastifyInstance } from 'fastify'
 import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
-import { discoverProjects, fullScan } from '../scanner/discovery.js'
-import { AGENTS } from '../scanner/agents.js'
+import {
+  discoverProjects,
+  fullScan,
+  saveProjectToRegistry,
+  addExcludedProject,
+  getExcludedProjects,
+  removeExcludedProject,
+  purgeProjectSkillsAndProfile
+} from '../scanner/discovery.js'
+import { AGENTS, allAgentProjectRelPaths } from '../scanner/agents.js'
 import { recommendSkills } from '../recommender/engine.js'
 import { invalidateCache } from './skills.js'
+import { syncProjectSkills } from './manage.js'
 import type { SkillProfile, ProjectWithProfile } from '../types.js'
 
 const homedir = os.homedir()
@@ -41,39 +50,37 @@ async function writeProjectProfile(projectPath: string, profile: SkillProfile): 
   await fs.writeFile(profilePath, JSON.stringify(profile, null, 2), 'utf-8')
 }
 
+
 /**
  * 辅助函数：查找某项目实际链接的 Skill 数量与状态
  */
 async function getProjectSkillsStatus(
   projectPath: string,
   profile?: SkillProfile
-): Promise<{ linkedCount: number; status: 'synced' | 'drift' | 'no-profile' }> {
-  if (!profile) {
-    return { linkedCount: 0, status: 'no-profile' }
-  }
-
-  const agent = AGENTS.find(a => a.id === profile.targetIde)
-  const relPaths = agent && agent.projectPaths.length > 0 ? agent.projectPaths : ['.agents/skills']
-  const targetDir = path.join(projectPath, relPaths[0])
-
-  let linkedCount = 0
+): Promise<{ linkedCount: number; status: 'synced' | 'drift' | 'no-profile'; actualSkills: string[] }> {
   const actualLinkedSkills = new Set<string>()
+  const uniqueRelPaths = allAgentProjectRelPaths()
 
-  try {
-    const entries = await fs.readdir(targetDir, { withFileTypes: true })
-    for (const entry of entries) {
-      const entryPath = path.join(targetDir, entry.name)
-      try {
-        const stat = await fs.lstat(entryPath)
-        if (stat.isSymbolicLink()) {
-          linkedCount++
+  for (const rel of uniqueRelPaths) {
+    const targetDir = path.join(projectPath, rel)
+    try {
+      const entries = await fs.readdir(targetDir, { withFileTypes: true })
+      for (const entry of entries) {
+        if (entry.name.startsWith('.')) continue
+        if (entry.isSymbolicLink() || entry.isDirectory()) {
           actualLinkedSkills.add(entry.name)
         }
-      } catch {}
-    }
-  } catch {}
+      }
+    } catch {}
+  }
 
-  // 检查是否漂移：声明的技能和实际软链接的技能是否一致
+  const linkedCount = actualLinkedSkills.size
+  const actualSkills = Array.from(actualLinkedSkills)
+
+  if (!profile) {
+    return { linkedCount, status: 'no-profile', actualSkills }
+  }
+
   const declaredSkills = new Set(profile.skills)
   let isSynced = true
 
@@ -84,18 +91,10 @@ async function getProjectSkillsStatus(
     }
   }
 
-  if (isSynced) {
-    for (const s of actualLinkedSkills) {
-      if (!declaredSkills.has(s)) {
-        isSynced = false
-        break
-      }
-    }
-  }
-
   return {
     linkedCount,
-    status: isSynced ? 'synced' : 'drift'
+    status: isSynced ? 'synced' : 'drift',
+    actualSkills,
   }
 }
 
@@ -106,17 +105,31 @@ export async function projectRoutes(app: FastifyInstance) {
     const projectsWithProfile: ProjectWithProfile[] = []
 
     for (const p of found) {
-      const profile = await readProjectProfile(p.path)
-      const { linkedCount, status } = await getProjectSkillsStatus(p.path, profile)
+      let profile = await readProjectProfile(p.path)
+      const { linkedCount, status, actualSkills } = await getProjectSkillsStatus(p.path, profile)
+
+      // 如果项目包含物理/软链技能但尚无 Profile，自动构建 Profile 契约
+      if (!profile && actualSkills.length > 0) {
+        profile = {
+          version: 1,
+          name: p.name,
+          description: '自动配置的项目 Profile',
+          skills: actualSkills,
+          targetIde: 'antigravity',
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        }
+        await writeProjectProfile(p.path, profile)
+      }
 
       projectsWithProfile.push({
         name: profile?.name || p.name,
         path: p.path,
-        skillCount: linkedCount, // 作为向后兼容，这个值表示实际链接数
+        skillCount: linkedCount,
         profile,
         linkedSkillCount: linkedCount,
-        profileSkillCount: profile?.skills.length || 0,
-        syncStatus: status
+        profileSkillCount: profile ? profile.skills.length : 0,
+        syncStatus: profile ? status : 'no-profile',
       })
     }
 
@@ -168,6 +181,7 @@ export async function projectRoutes(app: FastifyInstance) {
 
     try {
       await writeProjectProfile(projectPath, fullProfile)
+      await saveProjectToRegistry(projectPath, fullProfile.name)
       return { ok: true, profile: fullProfile }
     } catch (err: any) {
       reply.status(500)
@@ -200,114 +214,27 @@ export async function projectRoutes(app: FastifyInstance) {
       return { ok: false, error: '未提供项目路径 projectPath' }
     }
 
-    const profile = await readProjectProfile(projectPath)
+    let profile = await readProjectProfile(projectPath)
     if (!profile) {
-      reply.status(404)
-      return { ok: false, error: '该项目未创建 Skill 配置' }
+      const status = await getProjectSkillsStatus(projectPath)
+      profile = {
+        version: 1,
+        name: path.basename(projectPath),
+        description: '自动配置的项目 Profile',
+        skills: status.actualSkills,
+        targetIde: 'claude-code',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+      await writeProjectProfile(projectPath, profile)
     }
 
-    // 1. 获取全局所有的 Skill 映射（用于解析真实路径）
-    const scanRes = await fullScan()
-    const globalSkillsMap = new Map(scanRes.skills.map(s => [s.name, s]))
-
-    // 2. 找到目标 IDE 的项目级路径
-    const agent = AGENTS.find(a => a.id === profile.targetIde)
-    const relPaths = agent && agent.projectPaths.length > 0 ? agent.projectPaths : ['.agents/skills']
-    const targetDir = path.join(projectPath, relPaths[0])
-
     try {
-      // 创建目标目录
-      await fs.mkdir(targetDir, { recursive: true })
-
-      // 收集当前目录中所有的软链接，准备进行清理
-      const existingEntries = await fs.readdir(targetDir, { withFileTypes: true })
-      const toDelete = new Set<string>()
-
-      for (const entry of existingEntries) {
-        const entryPath = path.join(targetDir, entry.name)
-        try {
-          const lstat = await fs.lstat(entryPath)
-          if (lstat.isSymbolicLink()) {
-            toDelete.add(entry.name)
-          }
-        } catch {}
-      }
-
-      const results = []
-
-      // 3. 开始创建或更新软链接
-      for (const skillName of profile.skills) {
-        const skill = globalSkillsMap.get(skillName)
-        if (!skill) {
-          results.push({ name: skillName, success: false, error: '全局技能库中未找到此 Skill' })
-          continue
-        }
-
-        const targetLinkPath = path.join(targetDir, skill.name)
-        let resolvedRealPath: string
-        try {
-          resolvedRealPath = await fs.realpath(skill.realPath)
-        } catch {
-          resolvedRealPath = path.resolve(skill.realPath)
-        }
-
-        // 如果已经是一个软链接并且指向了正确的真实路径，就保留
-        let exists = false
-        let isSymlink = false
-        let currentTarget = ''
-
-        try {
-          const lstat = await fs.lstat(targetLinkPath)
-          exists = true
-          isSymlink = lstat.isSymbolicLink()
-          if (isSymlink) {
-            currentTarget = await fs.readlink(targetLinkPath)
-          }
-        } catch {
-          exists = false
-        }
-
-        if (exists) {
-          if (isSymlink) {
-            let resolvedTarget: string
-            try {
-              resolvedTarget = await fs.realpath(path.resolve(targetDir, currentTarget))
-            } catch {
-              resolvedTarget = path.resolve(targetDir, currentTarget)
-            }
-
-            if (resolvedTarget === resolvedRealPath) {
-              // 已经在目标位置且指向正确，从删除列表中移出
-              toDelete.delete(skill.name)
-              results.push({ name: skill.name, success: true, message: '无需更新' })
-              continue
-            }
-          }
-          // 如果是一个真实文件夹或错误的软链接，先删除它
-          await fs.unlink(targetLinkPath).catch(async () => {
-            // 如果是文件夹，说明有同名非软链接，为了安全我们不直接删除真实文件夹
-            throw new Error('存在同名的物理文件/文件夹，未进行覆盖')
-          })
-        }
-
-        // 创建新的软链接
-        try {
-          await fs.symlink(resolvedRealPath, targetLinkPath, 'dir')
-          toDelete.delete(skill.name)
-          results.push({ name: skill.name, success: true })
-        } catch (err: any) {
-          results.push({ name: skill.name, success: false, error: err.message })
-        }
-      }
-
-      // 4. 清理多余的旧软链接
-      for (const name of toDelete) {
-        const linkPath = path.join(targetDir, name)
-        await fs.unlink(linkPath).catch(() => {})
-      }
-
+      const scanRes = await fullScan()
+      const globalSkillsMap = new Map(scanRes.skills.map(s => [s.name, s]))
+      await syncProjectSkills(projectPath, globalSkillsMap)
       invalidateCache()
-      return { ok: true, results }
+      return { ok: true, message: '项目 Skill 同步成功' }
     } catch (err: any) {
       reply.status(500)
       return { ok: false, error: `同步失败: ${err.message}` }
@@ -374,5 +301,121 @@ export async function projectRoutes(app: FastifyInstance) {
       reply.status(500)
       return { ok: false, error: `清理失败: ${err.message}` }
     }
+  })
+
+  // 以项目为中心的单一 Skill 安装绑定接口
+  app.post<{
+    Body: { projectPath: string; skillName: string; targetIde?: string }
+  }>('/api/projects/install-skill', async (req, reply) => {
+    const { projectPath, skillName, targetIde } = req.body
+    if (!projectPath || !skillName) {
+      reply.status(400)
+      return { ok: false, error: '未提供 projectPath 或 skillName' }
+    }
+
+    let profile = await readProjectProfile(projectPath)
+    if (!profile) {
+      const status = await getProjectSkillsStatus(projectPath)
+      profile = {
+        version: 1,
+        name: path.basename(projectPath),
+        description: '自动配置的项目 Profile',
+        skills: status.actualSkills,
+        targetIde: targetIde || 'claude-code',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+    }
+
+    if (targetIde) {
+      profile.targetIde = targetIde
+    }
+
+    if (!profile.skills.includes(skillName)) {
+      profile.skills.push(skillName)
+    }
+
+    await writeProjectProfile(projectPath, profile)
+    const scanRes = await fullScan()
+    const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
+    await syncProjectSkills(projectPath, globalSkillsMap)
+    invalidateCache()
+
+    return { ok: true, profile }
+  })
+
+  // 以项目为中心的单一 Skill 卸载解绑接口
+  app.post<{
+    Body: { projectPath: string; skillName: string }
+  }>('/api/projects/uninstall-skill', async (req, reply) => {
+    const { projectPath, skillName } = req.body
+    if (!projectPath || !skillName) {
+      reply.status(400)
+      return { ok: false, error: '未提供 projectPath 或 skillName' }
+    }
+
+    let profile = await readProjectProfile(projectPath)
+    if (!profile) {
+      const status = await getProjectSkillsStatus(projectPath)
+      profile = {
+        version: 1,
+        name: path.basename(projectPath),
+        description: '',
+        skills: status.actualSkills,
+        targetIde: 'claude-code',
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      }
+    }
+
+    profile.skills = profile.skills.filter((s) => s !== skillName)
+    await writeProjectProfile(projectPath, profile)
+
+    const scanRes = await fullScan()
+    const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
+    await syncProjectSkills(projectPath, globalSkillsMap)
+    invalidateCache()
+
+    return { ok: true, profile }
+  })
+
+  // 删除 / 隐藏项目接口
+  app.post<{
+    Body: { projectPath: string; purgeFiles?: boolean }
+  }>('/api/projects/delete', async (req, reply) => {
+    const { projectPath, purgeFiles } = req.body
+    if (!projectPath) {
+      reply.status(400)
+      return { ok: false, error: '未提供 projectPath' }
+    }
+
+    if (purgeFiles) {
+      await purgeProjectSkillsAndProfile(projectPath)
+    }
+
+    await addExcludedProject(projectPath)
+    invalidateCache()
+    return { ok: true }
+  })
+
+  // 获取已隐藏/排除的项目列表
+  app.get('/api/projects/excluded', async () => {
+    const list = await getExcludedProjects()
+    return { ok: true, excludedProjects: list }
+  })
+
+  // 恢复显示被隐藏的项目
+  app.post<{
+    Body: { projectPath: string }
+  }>('/api/projects/restore', async (req, reply) => {
+    const { projectPath } = req.body
+    if (!projectPath) {
+      reply.status(400)
+      return { ok: false, error: '未提供 projectPath' }
+    }
+
+    await removeExcludedProject(projectPath)
+    invalidateCache()
+    return { ok: true }
   })
 }

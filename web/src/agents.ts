@@ -38,11 +38,15 @@ export type AgentId =
   | 'qwen-code'
   | 'replit'
   | 'roo'
+  | 'teleagent'
   | 'trae'
   | 'trae-cn'
   | 'universal'
   | 'warp'
   | 'windsurf'
+  | 'workbuddy'
+  | 'workbuddy-ai'
+  | 'zcode'
   | 'zencoder'
   | 'unknown'
 
@@ -90,6 +94,9 @@ export const AGENT_META: Record<AgentId, AgentMeta> = {
   augment:          { id: 'augment',        name: 'Augment',         icon: '⚡',  color: c.amber },
   bob:              { id: 'bob',            name: 'IBM Bob',         icon: '🤝',  color: c.cyan },
   codebuddy:        { id: 'codebuddy',      name: 'CodeBuddy',       icon: '👥',  color: c.green },
+  workbuddy:        { id: 'workbuddy',      name: 'WorkBuddy',       icon: '💼',  color: c.blue },
+  'workbuddy-ai':   { id: 'workbuddy-ai',   name: 'WorkBuddy AI',    icon: '💠',  color: c.fuchsia },
+  zcode:            { id: 'zcode',          name: 'ZCode',           icon: '⚡',  color: c.amber },
   openclaw:         { id: 'openclaw',       name: 'OpenClaw',        icon: '🦀',  color: c.red },
   universal:        { id: 'universal',      name: 'Universal',       icon: '🌐',  color: c.indigo },
 
@@ -122,6 +129,7 @@ export const AGENT_META: Record<AgentId, AgentMeta> = {
   'qwen-code':    { id: 'qwen-code',      name: 'Qwen Code',      icon: '📜',  color: c.amber },
   replit:         { id: 'replit',         name: 'Replit',         icon: '🔁',  color: c.orange },
   roo:            { id: 'roo',            name: 'Roo Code',       icon: '🦘',  color: c.yellow },
+  teleagent:      { id: 'teleagent',      name: 'TeleAgent',      icon: '📡',  color: c.cyan },
   trae:           { id: 'trae',           name: 'Trae',           icon: '🔺',  color: c.red },
   'trae-cn':      { id: 'trae-cn',        name: 'Trae CN',        icon: '🔻',  color: c.rose },
   warp:           { id: 'warp',           name: 'Warp',           icon: '⏩',  color: c.violet },
@@ -135,13 +143,16 @@ export const AGENT_ORDER: AgentId[] = [
   'claude-code',
   'cursor',
   'codex',
+  'antigravity',
+  'workbuddy',
+  'workbuddy-ai',
+  'zcode',
   'gemini-cli',
   'github-copilot',
   'windsurf',
   'continue',
   'adal',
   'amp',
-  'antigravity',
   'augment',
   'bob',
   'cline',
@@ -172,6 +183,7 @@ export const AGENT_ORDER: AgentId[] = [
   'qwen-code',
   'replit',
   'roo',
+  'teleagent',
   'trae',
   'trae-cn',
   'warp',

@@ -18,8 +18,16 @@ function isIgnoredPath(filePath: string): boolean {
 export function startWatcher(callback: WatchCallback): void {
   if (watcher) return
 
+  const warehouseDirs = [
+    path.join(homedir, 'Documents', 'wanfan-知识库', '004-Resource', '002-skills'),
+    path.join(homedir, 'Documents', 'wanfan-知识库', '004-Resource', 'skills'),
+    path.join(homedir, '.agents', 'skills'),
+    path.join(homedir, '.gemini', 'antigravity', 'skills'),
+  ]
+
   const watchPaths = [
     ...allAgentGlobalAbsPaths(homedir).map((x) => x.path),
+    ...warehouseDirs,
     path.join(homedir, '.newmax', 'skills'),
   ]
 

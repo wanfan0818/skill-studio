@@ -23,6 +23,7 @@ import {
   readIdeSettingsFull,
 } from '../routes/manage.js'
 import { analyzeSecurity } from './security.js'
+import { checkSkillDrift } from './drift.js'
 
 const homedir = os.homedir()
 
@@ -92,6 +93,14 @@ async function scanSkillDir(
   }
 
   for (const entry of entries) {
+    // Dot-entries directly inside a skills root are app bookkeeping, never
+    // user skills. Examples found in the wild: Codex keeps its bundled
+    // `.system/` skills there, TeleAgent keeps `.cache/`, WorkBuddy keeps
+    // migration markers, and every agent picks up a stray `.DS_Store`.
+    // Surfacing these as manageable skills is actively harmful — a user could
+    // delete `.system/` and break the agent — so they are skipped entirely.
+    if (entry.name.startsWith('.')) continue
+
     const entryPath = path.join(skillDir, entry.name)
 
     const symlinkInfo = await resolveSymlink(entryPath)
@@ -234,10 +243,92 @@ async function getDisabledSkills(): Promise<Set<string>> {
 }
 
 async function hasAnyAgentSkills(projectRoot: string): Promise<boolean> {
+  const profilePath = path.join(projectRoot, '.skills-profile.json')
+  try {
+    const s = await fs.stat(profilePath)
+    if (s.isFile()) return true
+  } catch {}
+
   for (const rel of allAgentProjectRelPaths()) {
     if (await dirExists(path.join(projectRoot, rel))) return true
   }
   return false
+}
+
+export async function getSavedProjects(): Promise<{ name: string; path: string }[]> {
+  const storePath = path.join(homedir, '.config', 'skill-studio', 'projects.json')
+  try {
+    const raw = await fs.readFile(storePath, 'utf-8')
+    const list = JSON.parse(raw)
+    if (Array.isArray(list)) {
+      return list.filter(p => p && typeof p.path === 'string')
+    }
+  } catch {}
+  return []
+}
+
+export async function removeSavedProjectFromRegistry(projectPath: string): Promise<void> {
+  const storePath = path.join(homedir, '.config', 'skill-studio', 'projects.json')
+  try {
+    const current = await getSavedProjects()
+    const filtered = current.filter(p => path.resolve(p.path) !== path.resolve(projectPath))
+    await fs.writeFile(storePath, JSON.stringify(filtered, null, 2), 'utf-8')
+  } catch {}
+}
+
+export async function getExcludedProjects(): Promise<string[]> {
+  const storePath = path.join(homedir, '.config', 'skill-studio', 'excluded-projects.json')
+  try {
+    const raw = await fs.readFile(storePath, 'utf-8')
+    const list = JSON.parse(raw)
+    if (Array.isArray(list)) {
+      return list.filter(p => typeof p === 'string').map(p => path.resolve(p))
+    }
+  } catch {}
+  return []
+}
+
+export async function addExcludedProject(projectPath: string): Promise<void> {
+  const storeDir = path.join(homedir, '.config', 'skill-studio')
+  const storePath = path.join(storeDir, 'excluded-projects.json')
+  await fs.mkdir(storeDir, { recursive: true })
+  
+  const target = path.resolve(projectPath)
+  const current = await getExcludedProjects()
+  if (!current.includes(target)) {
+    current.push(target)
+    await fs.writeFile(storePath, JSON.stringify(current, null, 2), 'utf-8')
+  }
+
+  await removeSavedProjectFromRegistry(projectPath)
+}
+
+export async function removeExcludedProject(projectPath: string): Promise<void> {
+  const storePath = path.join(homedir, '.config', 'skill-studio', 'excluded-projects.json')
+  try {
+    const target = path.resolve(projectPath)
+    const current = await getExcludedProjects()
+    const filtered = current.filter(p => p !== target)
+    await fs.writeFile(storePath, JSON.stringify(filtered, null, 2), 'utf-8')
+  } catch {}
+}
+
+export async function purgeProjectSkillsAndProfile(projectPath: string): Promise<void> {
+  const targetPath = path.resolve(projectPath)
+  
+  // 1. Delete .skills-profile.json
+  const profilePath = path.join(targetPath, '.skills-profile.json')
+  try {
+    await fs.unlink(profilePath)
+  } catch {}
+
+  // 2. Delete agent skill directories in project
+  for (const rel of allAgentProjectRelPaths()) {
+    const skillDir = path.join(targetPath, rel)
+    try {
+      await fs.rm(skillDir, { recursive: true, force: true })
+    } catch {}
+  }
 }
 
 async function discoverProjectsRecursively(
@@ -285,6 +376,16 @@ async function discoverProjectsRecursively(
 export async function discoverProjects(): Promise<{ name: string; path: string }[]> {
   const projects: { name: string; path: string }[] = []
 
+  // 0. Saved custom projects in ~/.config/skill-studio/projects.json
+  const savedProjs = await getSavedProjects()
+  for (const p of savedProjs) {
+    if (await dirExists(p.path)) {
+      if (!projects.some((existing) => existing.path === p.path)) {
+        projects.push(p)
+      }
+    }
+  }
+
   // 1. ~/.claude/projects/ (mangled path dirs — Claude tracks projects it's been opened in)
   const projectsDir = path.join(homedir, '.claude', 'projects')
   try {
@@ -295,6 +396,30 @@ export async function discoverProjects(): Promise<{ name: string; path: string }
       if (await dirExists(projectPath)) {
         if (projectPath === homedir) continue
         if (await hasAnyAgentSkills(projectPath)) {
+          if (!projects.some((p) => p.path === projectPath)) {
+            projects.push({
+              name: path.basename(projectPath),
+              path: projectPath,
+            })
+          }
+        }
+      }
+    }
+  } catch {}
+
+  // 1.5. ~/.gemini/projects.json (Antigravity tracks projects opened in it)
+  const geminiProjectsFile = path.join(homedir, '.gemini', 'projects.json')
+  try {
+    const raw = await fs.readFile(geminiProjectsFile, 'utf-8')
+    const parsed = JSON.parse(raw)
+    const geminiProjects = parsed?.projects && typeof parsed.projects === 'object' ? Object.keys(parsed.projects) : []
+    for (let projectPath of geminiProjects) {
+      if (typeof projectPath !== 'string' || !projectPath.trim()) continue
+      projectPath = path.resolve(projectPath.trim())
+      if (projectPath === homedir || projectPath === path.dirname(homedir)) continue
+      
+      if (await dirExists(projectPath)) {
+        if (!projects.some((p) => p.path === projectPath)) {
           projects.push({
             name: path.basename(projectPath),
             path: projectPath,
@@ -304,7 +429,51 @@ export async function discoverProjects(): Promise<{ name: string; path: string }
     }
   } catch {}
 
-  // 2. Common project root dirs — expanded list with CloudStorage & deep recursive scan
+  // 1.6. ~/.codex/config.toml (Codex tracks projects opened/trusted in it)
+  const codexConfigFile = path.join(homedir, '.codex', 'config.toml')
+  try {
+    const raw = await fs.readFile(codexConfigFile, 'utf-8')
+    const matches = raw.matchAll(/\[projects\."([^"]+)"\]/g)
+    for (const match of matches) {
+      let projectPath = match[1]
+      if (typeof projectPath !== 'string' || !projectPath.trim()) continue
+      projectPath = path.resolve(projectPath.trim())
+      if (projectPath === homedir || projectPath === path.dirname(homedir)) continue
+
+      if (await dirExists(projectPath)) {
+        if (!projects.some((p) => p.path === projectPath)) {
+          projects.push({
+            name: path.basename(projectPath),
+            path: projectPath,
+          })
+        }
+      }
+    }
+  } catch {}
+
+  // 1.7. ~/.zcode/v2/setting.json (ZCode tracks recent projects opened in it)
+  const zcodeSettingFile = path.join(homedir, '.zcode', 'v2', 'setting.json')
+  try {
+    const raw = await fs.readFile(zcodeSettingFile, 'utf-8')
+    const parsed = JSON.parse(raw)
+    const recentProjects = Array.isArray(parsed?.recentProjects) ? parsed.recentProjects : []
+    for (let projectPath of recentProjects) {
+      if (typeof projectPath !== 'string' || !projectPath.trim()) continue
+      projectPath = path.resolve(projectPath.trim())
+      if (projectPath === homedir || projectPath === path.dirname(homedir)) continue
+
+      if (await dirExists(projectPath)) {
+        if (!projects.some((p) => p.path === projectPath)) {
+          projects.push({
+            name: path.basename(projectPath),
+            path: projectPath,
+          })
+        }
+      }
+    }
+  } catch {}
+
+  // 2. Common project root dirs — light recursive scan (depth 3)
   const commonDirs = [
     path.join(homedir, 'Documents'),
     path.join(homedir, 'Projects'),
@@ -317,13 +486,12 @@ export async function discoverProjects(): Promise<{ name: string; path: string }
     path.join(homedir, 'work'),
     path.join(homedir, 'repos'),
     path.join(homedir, 'src'),
-    path.join(homedir, 'Library', 'CloudStorage'),
   ]
 
   for (const dir of commonDirs) {
     if (await dirExists(dir)) {
       try {
-        const found = await discoverProjectsRecursively(dir, 7)
+        const found = await discoverProjectsRecursively(dir, 3)
         for (const proj of found) {
           if (!projects.some((p) => p.path === proj.path)) {
             projects.push(proj)
@@ -349,7 +517,24 @@ export async function discoverProjects(): Promise<{ name: string; path: string }
     cwd = parent
   }
 
-  return projects
+  const excluded = await getExcludedProjects()
+  return projects.filter(p => !excluded.includes(path.resolve(p.path)))
+}
+
+export async function saveProjectToRegistry(projectPath: string, name?: string): Promise<void> {
+  const storeDir = path.join(homedir, '.config', 'skill-studio')
+  const storePath = path.join(storeDir, 'projects.json')
+  await fs.mkdir(storeDir, { recursive: true })
+  
+  const current = await getSavedProjects()
+  const projName = name || path.basename(projectPath)
+  if (!current.some(p => path.resolve(p.path) === path.resolve(projectPath))) {
+    current.push({ name: projName, path: projectPath })
+    await fs.writeFile(storePath, JSON.stringify(current, null, 2), 'utf-8')
+  }
+
+  // If it was excluded before, auto remove from excluded list
+  await removeExcludedProject(projectPath)
 }
 
 /**
@@ -486,10 +671,30 @@ export async function fullScan(): Promise<ScanResult> {
   }
 
   const settings = await readIdeSettingsFull()
+  const warehouseDirs = new Set<string>()
+
   if (settings.customGlobalSkillsDir) {
-    allSkills.push(
-      ...(await scanAndReport('global:custom', settings.customGlobalSkillsDir, 'global', 'universal')),
+    warehouseDirs.add(path.resolve(settings.customGlobalSkillsDir))
+  }
+  if (Array.isArray(settings.skillWarehouses)) {
+    for (const w of settings.skillWarehouses) {
+      if (w && typeof w === 'string') {
+        warehouseDirs.add(path.resolve(w))
+      }
+    }
+  }
+
+  for (const warehouseDir of warehouseDirs) {
+    const warehouseSkills = await scanAndReport(
+      `warehouse:${path.basename(warehouseDir)}`,
+      warehouseDir,
+      'global',
+      'universal',
     )
+    for (const ws of warehouseSkills) {
+      ws.isWarehouseSource = true
+    }
+    allSkills.push(...warehouseSkills)
   }
 
   // 1. Global skills — loop over every agent's global paths
@@ -543,14 +748,98 @@ export async function fullScan(): Promise<ScanResult> {
     )
   }
 
-  // Deduplicate by realPath (symlinks can point to the same skill from multiple roots)
-  const seen = new Set<string>()
-  const dedupedSkills: Skill[] = []
+  // Deduplicate by realPath & originPath (supports symlinks and materialized copy markers)
+  const seenByRealPath = new Map<string, Skill>()
+  const seenByName = new Map<string, Skill>()
+
+  // Pass 1: Index primary master skills (non-copies or global skills)
   for (const s of allSkills) {
-    if (seen.has(s.realPath)) continue
-    seen.add(s.realPath)
-    dedupedSkills.push(s)
+    const originPath = s.githubSource?.originPath
+    if (!originPath) {
+      if (!seenByRealPath.has(s.realPath)) {
+        seenByRealPath.set(s.realPath, s)
+      }
+      if (!seenByName.has(s.name)) {
+        seenByName.set(s.name, s)
+      }
+    }
   }
+
+  // Pass 2: Merge skills into main skills or add new master skills
+  for (const s of allSkills) {
+    s.linkedIdes = s.linkedIdes || []
+    s.linkedProjects = s.linkedProjects || []
+
+    const originPath = s.githubSource?.originPath
+    let mainSkill: Skill | undefined
+
+    if (originPath && seenByRealPath.has(originPath)) {
+      mainSkill = seenByRealPath.get(originPath)
+    } else if (seenByRealPath.has(s.realPath)) {
+      mainSkill = seenByRealPath.get(s.realPath)
+    } else if (originPath && seenByName.has(s.name)) {
+      mainSkill = seenByName.get(s.name)
+    }
+
+    if (mainSkill && mainSkill !== s) {
+      const isCopy = !!originPath
+      let hasDrift = false
+      if (isCopy) {
+        hasDrift = await checkSkillDrift(mainSkill.realPath, s.realPath)
+        if (hasDrift) {
+          mainSkill.hasDrift = true
+        }
+      }
+
+      if (s.scope === 'global' && s.agent !== 'universal') {
+        if (!mainSkill.linkedIdes) mainSkill.linkedIdes = []
+        if (!mainSkill.linkedIdes.includes(s.agent)) {
+          mainSkill.linkedIdes.push(s.agent)
+        }
+      } else if (s.scope === 'project' && s.projectName && s.projectPath) {
+        if (!mainSkill.linkedProjects) mainSkill.linkedProjects = []
+        if (!mainSkill.linkedProjects.some((p) => p.path === s.projectPath)) {
+          mainSkill.linkedProjects.push({
+            name: s.projectName,
+            path: s.projectPath,
+            agentId: s.agent,
+            isCopy,
+            hasDrift,
+          })
+        }
+      }
+      continue
+    }
+
+    if (s.scope === 'global' && s.agent !== 'universal') {
+      s.linkedIdes.push(s.agent)
+    } else if (s.scope === 'project' && s.projectName && s.projectPath) {
+      s.linkedProjects.push({
+        name: s.projectName,
+        path: s.projectPath,
+        agentId: s.agent,
+        isCopy: !!originPath,
+      })
+    }
+
+    seenByRealPath.set(s.realPath, s)
+    seenByName.set(s.name, s)
+  }
+
+  const dedupedSkills: Skill[] = Array.from(new Set(seenByRealPath.values()))
+
+  // Attach isGlobalActive status based on ~/.config/skill-studio/global-skills.json
+  try {
+    const globalConfigFile = path.join(homedir, '.config', 'skill-studio', 'global-skills.json')
+    const rawGlobalConfig = await fs.readFile(globalConfigFile, 'utf-8').catch(() => '{}')
+    const parsedGlobal = JSON.parse(rawGlobalConfig)
+    const globalNames = new Set<string>(Array.isArray(parsedGlobal.globalSkills) ? parsedGlobal.globalSkills : [])
+    for (const s of dedupedSkills) {
+      if (globalNames.has(s.name)) {
+        s.isGlobalActive = true
+      }
+    }
+  } catch {}
 
   const conflicts = detectConflicts(dedupedSkills)
 

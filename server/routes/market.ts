@@ -1,13 +1,10 @@
 import type { FastifyInstance } from 'fastify'
-import { exec } from 'child_process'
-import { promisify } from 'util'
 import os from 'os'
 import path from 'path'
 import fs from 'fs/promises'
 import { invalidateCache } from './skills.js'
 import { readIdeSettingsFull, copyDir } from './manage.js'
-
-const execAsync = promisify(exec)
+import { execSafeCmd } from '../utils/exec.js'
 
 function stripAnsi(str: string): string {
   return str.replace(/[\u001b\u009b][[()#;?]*(?:[0-9]{1,4}(?:;[0-9]{0,4})*)?[0-9A-ORZcf-nqry=><]/g, '')
@@ -25,10 +22,9 @@ export async function marketRoutes(app: FastifyInstance) {
 
     try {
       // Run skills find in temp dir to prevent workspace pollution
-      const { stdout } = await execAsync(`npx -y skills find "${q}"`, {
+      const { stdout } = await execSafeCmd(`npx -y skills find "${q}"`, {
         cwd: os.tmpdir(),
-        timeout: 20000, // 20s
-        stdio: ['ignore', 'pipe', 'pipe']
+        timeoutMs: 20000, // 20s
       })
 
       const lines = stdout.split('\n').map((l) => stripAnsi(l.trim())).filter(Boolean)
@@ -88,10 +84,9 @@ export async function marketRoutes(app: FastifyInstance) {
     }
 
     try {
-      const { stdout, stderr } = await execAsync(`npx -y skills add "${target}"`, {
+      const { stdout, stderr } = await execSafeCmd(`npx -y skills add "${target}"`, {
         cwd: installCwd,
-        timeout: 60000, // 60s for clone
-        stdio: ['ignore', 'pipe', 'pipe']
+        timeoutMs: 60000, // 60s for clone
       })
 
       const settings = await readIdeSettingsFull()

@@ -1,3 +1,4 @@
+import fs from 'fs'
 import path from 'path'
 
 export type AgentId =
@@ -40,11 +41,15 @@ export type AgentId =
   | 'qwen-code'
   | 'replit'
   | 'roo'
+  | 'teleagent'
   | 'trae'
   | 'trae-cn'
   | 'universal'
   | 'warp'
   | 'windsurf'
+  | 'workbuddy'
+  | 'workbuddy-ai'
+  | 'zcode'
   | 'zencoder'
   | 'unknown'
 
@@ -58,7 +63,8 @@ export interface AgentDef {
 
 /**
  * Registry of all supported agents. Mirrors the Supported Agents table from
- * https://www.npmjs.com/package/skills (42 agents as of 2026-04).
+ * https://www.npmjs.com/package/skills (42 agents as of 2026-04), plus
+ * `workbuddy-ai` and `teleagent`, verified against a live install.
  *
  * Design rules:
  *
@@ -81,6 +87,18 @@ export interface AgentDef {
  * 4. trae + trae-cn share `.trae/skills/` as project path. Attributed to
  *    `trae` (alphabetically first); trae-cn is distinguishable only via
  *    its unique global path or frontmatter override.
+ *
+ * 5. CodeBuddy / WorkBuddy / WorkBuddy AI are three SEPARATE products with
+ *    three separate directories (`~/.codebuddy/skills`, `~/.workbuddy/skills`,
+ *    `~/.workbuddy-ai/skills`). An earlier revision had codebuddy and
+ *    workbuddy cross-claim each other's paths, which double-attributed every
+ *    skill under `~/.workbuddy/skills`. Each agent claims only its own dir.
+ *
+ * 6. TeleAgent stores skills under a per-user directory with an opaque id
+ *    (`~/.config/TeleAgent/users/<userId>/skills/`). That segment is
+ *    expressed with a `*` wildcard and expanded against the filesystem by
+ *    `agentGlobalPaths()` / `allAgentGlobalAbsPaths()`. TeleAgent has no
+ *    project-level skill convention, so its projectPaths stays empty.
  */
 export const AGENTS: AgentDef[] = [
   // Most popular first
@@ -103,7 +121,7 @@ export const AGENTS: AgentDef[] = [
     name: 'Codex',
     icon: '💻',
     globalPaths: ['.codex/skills'],
-    projectPaths: [],
+    projectPaths: ['.codex/skills'],
   },
   {
     id: 'gemini-cli',
@@ -154,7 +172,7 @@ export const AGENTS: AgentDef[] = [
     name: 'Antigravity',
     icon: '🌌',
     globalPaths: ['.gemini/antigravity/skills'],
-    projectPaths: ['.antigravity/skills'],
+    projectPaths: ['.agents/skills', '.antigravity/skills', '.gemini/antigravity/skills'],
   },
   {
     id: 'augment',
@@ -182,7 +200,33 @@ export const AGENTS: AgentDef[] = [
     name: 'CodeBuddy',
     icon: '👥',
     globalPaths: ['.codebuddy/skills'],
-    projectPaths: ['.codebuddy/skills'],
+    projectPaths: ['.codebuddy/skills', '.agents/skills'],
+  },
+  {
+    id: 'workbuddy',
+    name: 'WorkBuddy',
+    icon: '💼',
+    globalPaths: ['.workbuddy/skills'],
+    projectPaths: ['.workbuddy/skills', '.agents/skills'],
+  },
+  {
+    // WorkBuddy AI is a separate product from WorkBuddy: it keeps its own
+    // skill store at ~/.workbuddy-ai/skills (project-level skills live in
+    // <project>/.workbuddy-ai/skills per its own skill-storage convention).
+    id: 'workbuddy-ai',
+    name: 'WorkBuddy AI',
+    icon: '💠',
+    globalPaths: ['.workbuddy-ai/skills'],
+    // Project-level skills. Two copies of the skill-list implementation ship
+    // inside the same app bundle and they disagree:
+    //   - the daemon (workbuddy-server) resolves
+    //     `<workspace>/<product.json dataFolderName>/skills`, and this build's
+    //     dataFolderName is `.workbuddy-ai` — that is the primary path;
+    //   - a second copy (workbuddy-core) hardcodes `<workspace>/.workbuddy/skills`.
+    // We deploy to both so the skills are discoverable no matter which copy
+    // answers. `.agents/skills` is kept for the shared universal convention.
+    // Verified against WorkBuddy AI 5.6.2 on 2026-09-30.
+    projectPaths: ['.workbuddy-ai/skills', '.workbuddy/skills', '.agents/skills'],
   },
   {
     id: 'commandcode',
@@ -367,6 +411,16 @@ export const AGENTS: AgentDef[] = [
     projectPaths: ['.roo/skills'],
   },
   {
+    // Skills are namespaced per TeleAgent account, so the path contains an
+    // opaque user id. The `*` segment is expanded at scan time against the
+    // real filesystem (see expandPathTemplate).
+    id: 'teleagent',
+    name: 'TeleAgent',
+    icon: '📡',
+    globalPaths: ['.config/TeleAgent/users/*/skills'],
+    projectPaths: [],
+  },
+  {
     id: 'trae',
     name: 'Trae',
     icon: '🔺',
@@ -386,6 +440,13 @@ export const AGENTS: AgentDef[] = [
     icon: '⏩',
     globalPaths: [],
     projectPaths: [],
+  },
+  {
+    id: 'zcode',
+    name: 'ZCode',
+    icon: '⚡',
+    globalPaths: ['.zcode/skills', '.zcode/cli/skills'],
+    projectPaths: ['.zcode/skills', '.agents/skills'],
   },
   {
     id: 'zencoder',
@@ -419,8 +480,89 @@ export function allAgentProjectRelPaths(): string[] {
   return Array.from(set)
 }
 
+function escapeRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+}
+
+/**
+ * Expand a path template that may contain `*` wildcards in one or more
+ * segments, e.g. the TeleAgent skills directory
+ * `~/.config/TeleAgent/users/<userId>/skills`.
+ *
+ * Contract:
+ *   - A template WITHOUT a wildcard is returned verbatim, whether or not it
+ *     exists on disk. Callers rely on this: `ensureEnabledIdesSymlinks`
+ *     bootstraps a brand-new IDE directory with `fs.mkdir(..., { recursive: true })`,
+ *     so the path must survive resolution before the directory exists.
+ *   - A template WITH a wildcard is matched against the filesystem at every
+ *     wildcard segment, and only existing directories are accepted there.
+ *     Literal segments after the wildcard are appended as-is. This is
+ *     deliberate: it makes it impossible for a caller to `mkdir` a literal
+ *     `*` directory, and a user-scoped agent with no account yet simply
+ *     resolves to an empty array.
+ */
+export function expandPathTemplate(absTemplate: string): string[] {
+  if (!absTemplate.includes('*')) return [absTemplate]
+
+  const segments = absTemplate.split(path.sep)
+  const root = segments[0] === '' ? path.sep : segments[0]
+  let candidates: string[] = [root]
+
+  for (let i = 1; i < segments.length; i++) {
+    const seg = segments[i]
+    const next: string[] = []
+
+    for (const base of candidates) {
+      // Literal segment — append and keep going.
+      if (!seg.includes('*')) {
+        next.push(path.join(base, seg))
+        continue
+      }
+
+      // Glob segment — match directory entries against the `*` pattern.
+      const pattern = new RegExp(
+        '^' + seg.split('*').map(escapeRegExp).join('[^/\\\\]*') + '$',
+      )
+      let entries: string[] = []
+      try {
+        entries = fs.readdirSync(base)
+      } catch {
+        continue
+      }
+      for (const entry of entries) {
+        if (!pattern.test(entry)) continue
+        const full = path.join(base, entry)
+        try {
+          if (fs.statSync(full).isDirectory()) next.push(full)
+        } catch {}
+      }
+    }
+
+    candidates = next
+    if (candidates.length === 0) break
+  }
+
+  return candidates
+}
+
+/**
+ * Resolve every concrete global directory for one agent.
+ *
+ * Most agents have exactly one static path, so this returns a single-element
+ * array. User-scoped agents (TeleAgent) expand to one directory per account.
+ */
+export function agentGlobalPaths(agent: AgentDef, homedir: string): string[] {
+  const out: string[] = []
+  for (const rel of agent.globalPaths) {
+    out.push(...expandPathTemplate(path.join(homedir, rel)))
+  }
+  return out
+}
+
 export function allAgentGlobalAbsPaths(homedir: string): { agent: AgentDef; path: string }[] {
   const out: { agent: AgentDef; path: string }[] = []
-  for (const a of AGENTS) for (const rel of a.globalPaths) out.push({ agent: a, path: path.join(homedir, rel) })
+  for (const a of AGENTS) {
+    for (const p of agentGlobalPaths(a, homedir)) out.push({ agent: a, path: p })
+  }
   return out
 }

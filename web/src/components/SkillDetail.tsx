@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { SourceBadge, ScopeBadge } from './SourceBadge'
 import { SkillEditor } from './SkillEditor'
 import { VersionHistory } from './VersionHistory'
@@ -35,15 +35,118 @@ export function SkillDetail({
   const [confirmDelete, setConfirmDelete] = useState(false)
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
+  const [associationData, setAssociationData] = useState<{
+    ides: Array<{ id: string; name: string; enabled: boolean; linked: boolean }>
+    projects: Array<{ name: string; path: string; enabled: boolean; linked: boolean }>
+  } | null>(null)
+  const [associationLoading, setAssociationLoading] = useState(false)
+  const [saveAssociationLoading, setSaveAssociationLoading] = useState(false)
+
+  const fetchAssociation = async () => {
+    setAssociationLoading(true)
+    try {
+      const res = await fetch(`/api/skills/${skill.name}/association`)
+      const data = await res.json()
+      if (data.ides) {
+        setAssociationData(data)
+      }
+    } catch (err) {
+      console.error('Failed to fetch association:', err)
+    } finally {
+      setAssociationLoading(false)
+    }
+  }
+
+  useEffect(() => {
+    fetchAssociation()
+  }, [skill])
+
+  const handleToggleIde = (ideId: string) => {
+    if (!associationData) return
+    setAssociationData({
+      ...associationData,
+      ides: associationData.ides.map(ide => 
+        ide.id === ideId ? { ...ide, enabled: !ide.enabled } : ide
+      )
+    })
+  }
+
+  const handleToggleProject = (projectPath: string) => {
+    if (!associationData) return
+    setAssociationData({
+      ...associationData,
+      projects: associationData.projects.map(proj => 
+        proj.path === projectPath ? { ...proj, enabled: !proj.enabled } : proj
+      )
+    })
+  }
+
+  const handleSaveAssociation = async () => {
+    if (!associationData) return
+    setSaveAssociationLoading(true)
+    
+    const disabledIdes = associationData.ides
+      .filter(ide => !ide.enabled)
+      .map(ide => ide.id)
+      
+    const enabledProjectPaths = associationData.projects
+      .filter(proj => proj.enabled)
+      .map(proj => proj.path)
+
+    try {
+      const res = await fetch(`/api/skills/${skill.name}/association`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ disabledIdes, enabledProjectPaths }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        showMsg('success', '分发与关联关系保存并同步成功！')
+        if (onChanged) await onChanged()
+        await fetchAssociation()
+      } else {
+        showMsg('error', data.error || '保存失败')
+      }
+    } catch (err: any) {
+      showMsg('error', '保存失败: ' + err.message)
+    } finally {
+      setSaveAssociationLoading(false)
+    }
+  }
+
   const [bindUrl, setBindUrl] = useState('')
   const [isEditingBind, setIsEditingBind] = useState(false)
   const [bindLoading, setBindLoading] = useState(false)
   const [checkLoading, setCheckLoading] = useState(false)
   const [updateLoading, setUpdateLoading] = useState(false)
+  const [globalLoading, setGlobalLoading] = useState(false)
 
   const showMsg = (type: 'success' | 'error', text: string) => {
     setMessage({ type, text })
     if (type === 'success') setTimeout(() => setMessage(null), 3000)
+  }
+
+  const handleToggleGlobal = async () => {
+    setGlobalLoading(true)
+    try {
+      const nextState = !skill.isGlobalActive
+      const res = await fetch('/api/global-skills/toggle', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ skillName: skill.name, isGlobal: nextState }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        showMsg('success', data.message || '操作成功！')
+        if (onChanged) await onChanged()
+      } else {
+        showMsg('error', data.error || '切换全局设置失败')
+      }
+    } catch (err: any) {
+      showMsg('error', '操作失败: ' + err.message)
+    } finally {
+      setGlobalLoading(false)
+    }
   }
 
   const handleBind = async (e?: React.FormEvent) => {
@@ -202,6 +305,27 @@ export function SkillDetail({
             <div className="flex flex-wrap gap-1.5 mt-1.5">
               <ScopeBadge scope={skill.scope} />
               <SourceBadge source={skill.source} />
+              {skill.isGlobalActive ? (
+                <button
+                  disabled={globalLoading}
+                  onClick={handleToggleGlobal}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 hover:bg-rose-500/20 hover:text-rose-300 hover:border-rose-500/40 transition-all cursor-pointer shadow-sm"
+                  title="点击可取消全局生效部署"
+                >
+                  <span>🌐</span>
+                  <span>已设为全局 Skill (点击取消)</span>
+                </button>
+              ) : (
+                <button
+                  disabled={globalLoading}
+                  onClick={handleToggleGlobal}
+                  className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold bg-slate-800 text-slate-300 border border-slate-700 hover:bg-emerald-600 hover:text-white hover:border-emerald-500 transition-all cursor-pointer"
+                  title="点击一键将此 Skill 设为全局通用 Skill，自动挂载至全系统 IDE"
+                >
+                  <span>🌐</span>
+                  <span>设为全局 Skill</span>
+                </button>
+              )}
               {!skill.enabled && (
                 <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-red-500/20 text-red-400">
                   已禁用
@@ -485,6 +609,96 @@ export function SkillDetail({
                 </button>
               )}
             </form>
+          )}
+        </div>
+
+        {/* 分发与关联管理 */}
+        <div>
+          <SectionTitle>分发与关联管理</SectionTitle>
+          {associationLoading ? (
+            <div className="text-xs text-slate-500 py-2">正在载入关联配置...</div>
+          ) : associationData ? (
+            <div className="bg-slate-950/30 rounded-lg border border-slate-800/60 p-3 space-y-4">
+              {/* IDEs */}
+              <div className="space-y-2">
+                <span className="text-[11px] font-semibold text-slate-400 block border-b border-slate-800/40 pb-1">
+                  分发到全局 IDE
+                </span>
+                <div className="grid grid-cols-2 gap-2">
+                  {associationData.ides.map((ide) => (
+                    <label key={ide.id} className="flex items-center gap-2 text-xs text-slate-300 hover:text-slate-100 cursor-pointer select-none">
+                      <input
+                        type="checkbox"
+                        checked={ide.enabled}
+                        onChange={() => handleToggleIde(ide.id)}
+                        className="rounded border-slate-800 text-indigo-600 bg-slate-950 focus:ring-indigo-500 focus:ring-offset-slate-900"
+                      />
+                      <span>{ide.name}</span>
+                      {ide.linked && (
+                        <span className="ml-auto inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+                          已链
+                        </span>
+                      )}
+                    </label>
+                  ))}
+                </div>
+              </div>
+
+              {/* Projects */}
+              <div className="space-y-2">
+                <span className="text-[11px] font-semibold text-slate-400 block border-b border-slate-800/40 pb-1">
+                  应用到本地项目
+                </span>
+                {associationData.projects.length === 0 ? (
+                  <p className="text-[10px] text-slate-500">暂无检测到本地项目，您可在「项目管理」中导入。</p>
+                ) : (
+                  <div className="max-h-40 overflow-y-auto space-y-1.5 pr-1">
+                    {associationData.projects.map((proj) => {
+                      const linkedInfo = skill.linkedProjects?.find((p) => p.path === proj.path)
+                      return (
+                        <label key={proj.path} className="flex items-center gap-2 text-xs text-slate-300 hover:text-slate-100 cursor-pointer select-none">
+                          <input
+                            type="checkbox"
+                            checked={proj.enabled}
+                            onChange={() => handleToggleProject(proj.path)}
+                            className="rounded border-slate-800 text-indigo-600 bg-slate-950 focus:ring-indigo-500 focus:ring-offset-slate-900"
+                          />
+                          <span className="truncate flex-1" title={proj.path}>{proj.name}</span>
+                          {linkedInfo?.isCopy && (
+                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                              📂 物理副本
+                            </span>
+                          )}
+                          {linkedInfo?.hasDrift && (
+                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-semibold bg-red-500/20 text-red-400 border border-red-500/30 animate-pulse">
+                              ⚠️ 副本已过时
+                            </span>
+                          )}
+                          {proj.linked && !linkedInfo?.hasDrift && (
+                            <span className="inline-flex items-center px-1.5 py-0.2 rounded text-[9px] font-medium bg-green-500/10 text-green-400 border border-green-500/20">
+                              已链
+                            </span>
+                          )}
+                        </label>
+                      )
+                    })}
+                  </div>
+                )}
+              </div>
+
+              {/* Save button */}
+              <div className="border-t border-slate-800/65 pt-2.5 flex justify-end">
+                <button
+                  onClick={handleSaveAssociation}
+                  disabled={saveAssociationLoading}
+                  className="px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded transition-all"
+                >
+                  {saveAssociationLoading ? '保存并同步中...' : '保存修改并自动同步'}
+                </button>
+              </div>
+            </div>
+          ) : (
+            <div className="text-xs text-slate-500 py-2">无法载入关联配置</div>
           )}
         </div>
 

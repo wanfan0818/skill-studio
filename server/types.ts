@@ -21,15 +21,17 @@ import type { HealthReport } from './scanner/health.js'
 import type { SecurityStatus } from './scanner/security.js'
 
 export interface SkillGithubSource {
-  owner: string
-  repo: string
-  branch: string
-  subPath: string
+  owner?: string
+  repo?: string
+  branch?: string
+  subPath?: string
   installedCommit?: string
   installedAt?: string
   lastChecked?: string
   updateAvailable?: boolean
   latestCommit?: string
+  originPath?: string
+  copiedAt?: string
 }
 
 export interface Skill {
@@ -50,9 +52,36 @@ export interface Skill {
   files: string[]
   enabled: boolean
   hasConflict: boolean
+  hasDrift?: boolean
   lastModified: string
   security?: SecurityStatus
-  githubSource?: SkillGithubSource // Added for GitHub update tracking
+  githubSource?: SkillGithubSource // Added for GitHub update tracking & distribution marker
+  linkedIdes?: string[] // IDE IDs that link to this skill
+  linkedProjects?: Array<{
+    name: string
+    path: string
+    agentId: string
+    isCopy?: boolean
+    hasDrift?: boolean
+  }>
+  isWarehouseSource?: boolean
+  isGlobalActive?: boolean
+  globalDeployments?: string[]
+}
+
+export interface GlobalSkillsConfig {
+  globalSkills: string[]
+  targetIdes?: string[]
+  updatedAt?: string
+}
+
+export interface IDESettings {
+  enabledAgentIds: string[]
+  customGlobalSkillsDir?: string
+  skillWarehouses?: string[]
+  githubToken?: string
+  httpProxy?: string
+  skillOverrides?: Record<string, { enabledIdes?: string[]; disabledIdes?: string[] }>
 }
 
 export interface Project {
