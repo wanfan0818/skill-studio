@@ -6,6 +6,7 @@ import { parseSkillMd } from '../scanner/parser.js'
 import { invalidateCache } from './skills.js'
 import { readIdeSettingsFull } from '../settings.js'
 import { execFileSafe } from '../utils/exec.js'
+import { copyDir } from '../utils/fs.js'
 import { isInside, isPlainSegment } from '../utils/safe.js'
 
 /**
@@ -138,8 +139,9 @@ export async function githubRoutes(app: FastifyInstance) {
     }
 
     pruneStaleClones()
+    let tempDir: string | null = null
     try {
-      const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
+      tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
       cloneDirs.set(tempDir, { createdAt: Date.now(), repoName: repoNameFromUrl(cloneUrl) })
 
       await execFileSafe('git', ['clone', '--depth', '1', '--', cloneUrl, tempDir], {
@@ -198,6 +200,11 @@ export async function githubRoutes(app: FastifyInstance) {
         skills
       }
     } catch (err: any) {
+      // Don't leave a half-cloned temp dir behind.
+      if (tempDir) {
+        cloneDirs.delete(tempDir)
+        await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
+      }
       reply.status(500)
       return { ok: false, error: `Git 克隆或解析失败: ${err.message}` }
     }
@@ -251,7 +258,9 @@ export async function githubRoutes(app: FastifyInstance) {
 
     try {
       await fs.mkdir(destParentDir, { recursive: true })
-      await fs.cp(skillPath, destPath, { recursive: true })
+      // Never carry the clone's .git along (a repo-root skill would otherwise
+      // become a nested git repository inside the warehouse).
+      await copyDir(skillPath, destPath, { skip: (name) => name === '.git' })
 
       invalidateCache()
       return { ok: true }
