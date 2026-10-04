@@ -388,9 +388,6 @@ function computeDiff(oldText: string, newText: string): DiffLine[] {
 }
 
 function longestCommonSubsequence(a: string[], b: string[]): string[] {
-  const m = a.length
-  const n = b.length
-
   // Optimize for large files: limit to first 2000 lines
   const maxLen = 2000
   const aa = a.slice(0, maxLen)

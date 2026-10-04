@@ -436,6 +436,12 @@ function App() {
 
               {/* Scrollable Main Content */}
               <div className="flex-1 overflow-y-auto px-6 py-5 min-w-0">
+                {error && (
+                  <div className="mb-4 px-4 py-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-300 flex items-start justify-between gap-3">
+                    <span className="whitespace-pre-wrap break-all">扫描失败：{error}</span>
+                    <button onClick={() => scan(true)} className="shrink-0 text-rose-200 hover:text-white cursor-pointer">重试</button>
+                  </div>
+                )}
                 {view === 'sync' ? (
                   <SyncView key={syncTab ?? 'default'} allSkills={allSkills} initialTab={syncTab} />
                 ) : view === 'explore' ? (

@@ -14,7 +14,7 @@ import {
 import { AGENTS, allAgentProjectRelPaths } from '../scanner/agents.js'
 import { recommendSkills } from '../recommender/engine.js'
 import { invalidateCache } from './skills.js'
-import { syncProjectSkills } from './manage.js'
+import { syncProjectSkills } from '../projects/sync.js'
 import type { SkillProfile, ProjectWithProfile } from '../types.js'
 import { isPlainSegment, writeFileAtomic } from '../utils/safe.js'
 

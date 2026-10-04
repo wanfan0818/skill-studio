@@ -247,8 +247,6 @@ export async function updaterRoutes(app: FastifyInstance) {
 
   // POST /api/skills/updater/auto-link
   app.post('/api/skills/updater/auto-link', async (req, reply) => {
-    const { discoverProjects } = await import('../scanner/discovery.js')
-    const projects = await discoverProjects()
     const skills = await getSkillsList()
 
     let boundCount = 0

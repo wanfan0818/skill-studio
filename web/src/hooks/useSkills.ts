@@ -35,8 +35,8 @@ export function useSkills() {
     setError(null)
     try {
       const res = await fetch(force ? '/api/scan?force=1' : '/api/scan')
-      if (!res.ok) throw new Error('Scan failed')
-      const data = await res.json()
+      const data = await res.json().catch(() => null)
+      if (!res.ok || !data) throw new Error(data?.message || data?.error || `HTTP ${res.status}`)
       setAllSkills(data.skills)
       setSkills(data.skills)
       setStats(data.stats)
