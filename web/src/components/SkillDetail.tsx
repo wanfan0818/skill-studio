@@ -29,6 +29,21 @@ export function SkillDetail({
   onChanged,
 }: SkillDetailProps) {
   const [editing, setEditing] = useState(false)
+  // Full SKILL.md text is not part of the list payload; load it on demand.
+  const [fullContent, setFullContent] = useState<string | null>(skill.content ?? null)
+  useEffect(() => {
+    let active = true
+    setFullContent(skill.content ?? null)
+    fetch(`/api/skills/${skill.id}`)
+      .then((r) => (r.ok ? r.json() : null))
+      .then((d) => {
+        if (active && d && typeof d.content === 'string') setFullContent(d.content)
+      })
+      .catch(() => {})
+    return () => {
+      active = false
+    }
+  }, [skill.id, skill.lastModified])
   const [showVersions, setShowVersions] = useState(false)
   const [showActions, setShowActions] = useState(false)
   const [actionLoading, setActionLoading] = useState<string | null>(null)
@@ -287,7 +302,7 @@ export function SkillDetail({
   if (editing) {
     return (
       <SkillEditor
-        skill={skill}
+        skill={{ ...skill, content: fullContent ?? '' }}
         onSave={async (content) => {
           await onSaveContent(skill, content)
           showMsg('success', '保存成功')
@@ -421,7 +436,9 @@ export function SkillDetail({
           >
             {skill.enabled ? '禁用' : '启用'}
           </ActionButton>
-          <ActionButton onClick={() => setEditing(true)}>编辑 SKILL.md</ActionButton>
+          <ActionButton onClick={() => fullContent !== null && setEditing(true)}>
+            {fullContent === null ? '载入中…' : '编辑 SKILL.md'}
+          </ActionButton>
           <ActionButton onClick={() => setShowVersions(true)} variant="default">
             版本历史
           </ActionButton>
@@ -736,11 +753,11 @@ export function SkillDetail({
         </div>
 
         {/* Content preview */}
-        {skill.content && (
+        {fullContent && (
           <div>
             <SectionTitle>SKILL.md 预览</SectionTitle>
             <pre className="bg-slate-950 border border-slate-800/60 rounded-lg p-3 text-[11px] text-slate-300 overflow-x-auto max-h-60 overflow-y-auto whitespace-pre-wrap leading-relaxed font-mono">
-              {skill.content}
+              {fullContent}
             </pre>
           </div>
         )}

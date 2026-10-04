@@ -8,7 +8,7 @@ interface SkillEditorProps {
 }
 
 export function SkillEditor({ skill, onSave, onClose }: SkillEditorProps) {
-  const [content, setContent] = useState(skill.content)
+  const [content, setContent] = useState(skill.content ?? '')
   const [saving, setSaving] = useState(false)
   const [saved, setSaved] = useState(false)
 
@@ -23,7 +23,7 @@ export function SkillEditor({ skill, onSave, onClose }: SkillEditorProps) {
     }
   }
 
-  const hasChanges = content !== skill.content
+  const hasChanges = content !== (skill.content ?? '')
 
   return (
     <div className="w-full h-full bg-slate-900/10 flex flex-col overflow-hidden">

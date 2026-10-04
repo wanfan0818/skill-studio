@@ -120,6 +120,8 @@ export interface ScanResult {
   }
   scannedPaths: ScanPathReport[]
   durationMs: number
+  /** Per-phase wall time in ms, for /api/debug and benchmarks. */
+  timings?: Record<string, number>
 }
 
 export interface SkillProfile {

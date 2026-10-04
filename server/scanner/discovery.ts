@@ -4,7 +4,8 @@ import os from 'os'
 import crypto from 'crypto'
 import { parseSkillMd, listSkillFiles, getSkillMdPath } from './parser.js'
 import { resolveSymlink, identifySource } from './symlink.js'
-import { readSkillSource, writeSkillSource, parseGithubUrl, findSourceInManifests } from '../updater/source.js'
+import { readSkillSource, parseGithubUrl, findSourceInManifests, type ManifestCache } from '../updater/source.js'
+import { mapLimit } from '../utils/concurrency.js'
 import {
   AGENTS,
   allAgentGlobalAbsPaths,
@@ -71,156 +72,156 @@ async function dirExists(p: string): Promise<boolean> {
   }
 }
 
+/**
+ * Per-scan shared state. Many agent directories link to the same physical
+ * skills (a warehouse skill is typically seen 3–5 times per scan), so the
+ * expensive per-skill work — reading and parsing SKILL.md, listing files,
+ * the security scan, manifest lookups — is done once per real path.
+ */
+interface ScanContext {
+  disabledSkills: Set<string>
+  manifestCache: ManifestCache
+  skillData: Map<string, Promise<SkillData | null>>
+}
+
+interface SkillData {
+  frontmatter: Record<string, unknown>
+  text: string
+  files: string[]
+  lastModified: string
+  security: ReturnType<typeof analyzeSecurity>
+  ownSource: any
+}
+
+function newScanContext(disabledSkills: Set<string>): ScanContext {
+  return { disabledSkills, manifestCache: new Map(), skillData: new Map() }
+}
+
+async function loadSkillData(realPath: string): Promise<SkillData | null> {
+  try {
+    if (!(await fs.stat(realPath)).isDirectory()) return null
+  } catch {
+    return null
+  }
+  const skillMdPath = getSkillMdPath(realPath)
+  const files = await listSkillFiles(realPath)
+  // A SKILL.md that is itself a symlink isn't reported as a plain file.
+  const skillMdExists = files.includes('SKILL.md') || (await fs.stat(skillMdPath).then((st) => st.isFile(), () => false))
+  if (!skillMdExists && files.length === 0) return null
+
+  let frontmatter: Record<string, unknown> = {}
+  let text = ''
+  let mtimePath = realPath
+  if (skillMdExists) {
+    mtimePath = skillMdPath
+    try {
+      const parsed = await parseSkillMd(skillMdPath)
+      frontmatter = sanitizeFrontmatter(parsed.frontmatter as Record<string, unknown>)
+      text = toSafeString(parsed.rawContent || parsed.content)
+    } catch {}
+  }
+  let lastModified = new Date().toISOString()
+  try {
+    lastModified = (await fs.stat(mtimePath)).mtime.toISOString()
+  } catch {}
+
+  return {
+    frontmatter,
+    text,
+    files,
+    lastModified,
+    security: analyzeSecurity(text),
+    ownSource: await readSkillSource(realPath),
+  }
+}
+
 async function scanSkillDir(
   skillDir: string,
   scope: 'global' | 'project' | 'plugin',
   agent: AgentId,
+  ctx: ScanContext,
   projectName?: string,
   projectPath?: string,
-  disabledSkills?: Set<string>,
 ): Promise<Skill[]> {
-  const skills: Skill[] = []
-
   let entries: import('fs').Dirent[]
   try {
     entries = await fs.readdir(skillDir, { withFileTypes: true })
   } catch {
-    return skills
+    return []
   }
 
-  for (const entry of entries) {
+  // Entries are independent: process a few at a time, keep the original order.
+  const scanned = await mapLimit(entries, 8, async (entry): Promise<Skill | null> => {
     // Dot-entries directly inside a skills root are app bookkeeping, never
     // user skills. Examples found in the wild: Codex keeps its bundled
     // `.system/` skills there, TeleAgent keeps `.cache/`, WorkBuddy keeps
     // migration markers, and every agent picks up a stray `.DS_Store`.
     // Surfacing these as manageable skills is actively harmful — a user could
     // delete `.system/` and break the agent — so they are skipped entirely.
-    if (entry.name.startsWith('.')) continue
+    if (entry.name.startsWith('.')) return null
 
     const entryPath = path.join(skillDir, entry.name)
-
     const symlinkInfo = await resolveSymlink(entryPath)
     const realPath = symlinkInfo.realPath
 
-    let isDir = false
-    try {
-      const stat = await fs.stat(realPath)
-      isDir = stat.isDirectory()
-    } catch {
-      continue
-    }
+    let pending = ctx.skillData.get(realPath)
+    if (!pending) ctx.skillData.set(realPath, (pending = loadSkillData(realPath)))
+    const data = await pending
+    if (!data) return null
 
-    if (!isDir) continue
-
-    const skillMdPath = getSkillMdPath(realPath)
-    let skillMdExists = false
-    try {
-      await fs.access(skillMdPath)
-      skillMdExists = true
-    } catch {}
-
-    if (!skillMdExists) {
-      const files = await listSkillFiles(realPath)
-      if (files.length === 0) continue
-    }
-
-    let frontmatter = {}
-    let content = ''
-    let rawContent = ''
-
-    if (skillMdExists) {
-      try {
-        const parsed = await parseSkillMd(skillMdPath)
-        frontmatter = parsed.frontmatter
-        content = parsed.content
-        rawContent = parsed.rawContent
-      } catch {}
-    }
-
-    const files = await listSkillFiles(realPath)
-    const source = symlinkInfo.isSymlink
-      ? identifySource(realPath, homedir)
-      : 'local'
-
-    let lastModified = new Date().toISOString()
-    try {
-      const stat = await fs.stat(skillMdExists ? skillMdPath : realPath)
-      lastModified = stat.mtime.toISOString()
-    } catch {}
-
-    const safeFrontmatter = sanitizeFrontmatter(frontmatter as Record<string, unknown>)
-    const skillName = toSafeString((safeFrontmatter as any).name) || entry.name
-    const description = toSafeString((safeFrontmatter as any).description)
+    const fm = data.frontmatter as any
+    const skillName = toSafeString(fm.name) || entry.name
+    const description = toSafeString(fm.description)
 
     // Frontmatter `agent:` overrides the path-based guess when it's a known id.
-    const fmAgent = toSafeString((safeFrontmatter as any).agent).toLowerCase().trim()
+    const fmAgent = toSafeString(fm.agent).toLowerCase().trim()
     const resolvedAgent: AgentId = fmAgent && isValidAgentId(fmAgent) ? fmAgent : agent
 
-    // Read githubSource
-    let githubSource: any = await readSkillSource(realPath)
-    if (!githubSource) {
-      if ((safeFrontmatter as any).source) {
-        const parsed = parseGithubUrl(toSafeString((safeFrontmatter as any).source))
-        if (parsed) {
-          githubSource = {
-            owner: parsed.owner,
-            repo: parsed.repo,
-            branch: parsed.branch,
-            subPath: parsed.subPath,
-            installedAt: new Date().toISOString()
-          }
-          try {
-            await writeSkillSource(realPath, githubSource)
-          } catch (err) {
-            console.error(`Failed to automatically write .skill-source for ${skillName}:`, err)
-          }
-        }
-      } else {
-        // Fallback to checking skills.json or skills-lock.json (for skills installed via skills.sh)
-        const found = await findSourceInManifests(skillName, realPath, projectPath)
-        if (found) {
-          githubSource = {
-            owner: found.owner,
-            repo: found.repo,
-            branch: found.branch,
-            subPath: found.subPath,
-            installedCommit: found.installedCommit,
-            installedAt: new Date().toISOString()
-          }
-          try {
-            await writeSkillSource(realPath, githubSource)
-          } catch (err) {
-            console.error(`Failed to automatically write .skill-source from manifest for ${skillName}:`, err)
-          }
+    // GitHub source: .skill-source on disk, else frontmatter `source:`, else
+    // a skills.sh manifest. Derived in memory only — scanning never writes
+    // into skill directories; explicit updater actions persist it.
+    let githubSource: any = data.ownSource
+    if (!githubSource && fm.source) {
+      const parsed = parseGithubUrl(toSafeString(fm.source))
+      if (parsed) githubSource = { owner: parsed.owner, repo: parsed.repo, branch: parsed.branch, subPath: parsed.subPath }
+    } else if (!githubSource) {
+      const found = await findSourceInManifests(skillName, realPath, projectPath, ctx.manifestCache)
+      if (found) {
+        githubSource = {
+          owner: found.owner,
+          repo: found.repo,
+          branch: found.branch,
+          subPath: found.subPath,
+          installedCommit: found.installedCommit,
         }
       }
     }
 
-    skills.push({
+    return {
       id: makeId(entryPath),
       name: skillName,
       description,
       scope,
       agent: resolvedAgent,
-      source,
+      source: symlinkInfo.isSymlink ? identifySource(realPath, homedir) : 'local',
       category: '', // populated later by classifyAll()
       path: entryPath,
       realPath,
       symlinkTarget: symlinkInfo.isSymlink ? symlinkInfo.target : undefined,
       projectName,
       projectPath,
-      frontmatter: safeFrontmatter as any,
-      content: toSafeString(rawContent || content),
-      files,
-      enabled: disabledSkills ? !disabledSkills.has(skillName) : true,
+      frontmatter: data.frontmatter as any,
+      content: data.text,
+      files: data.files,
+      enabled: !ctx.disabledSkills.has(skillName),
       hasConflict: false,
-      lastModified,
-      security: analyzeSecurity(toSafeString(rawContent || content)),
-      githubSource: githubSource || undefined,
-    })
-  }
+      lastModified: data.lastModified,
+      security: data.security,
+      githubSource: githubSource ? { ...githubSource } : undefined,
+    }
+  })
 
-  return skills
+  return scanned.filter((s): s is Skill => s !== null)
 }
 
 async function getDisabledSkills(): Promise<Set<string>> {
@@ -238,17 +239,29 @@ async function getDisabledSkills(): Promise<Set<string>> {
   return disabled
 }
 
-async function hasAnyAgentSkills(projectRoot: string): Promise<boolean> {
+/**
+ * Does `projectRoot` hold a skills profile or any agent's project skill dir?
+ * When the caller already listed the directory, `entries` lets us answer
+ * without touching disk for the (common) case of no agent marker at all.
+ */
+async function hasAnyAgentSkills(projectRoot: string, entries?: import('fs').Dirent[]): Promise<boolean> {
+  const rels = allAgentProjectRelPaths()
+  if (entries) {
+    const names = new Set(entries.map((e) => e.name))
+    if (names.has('.skills-profile.json')) return true
+    const candidates = rels.filter((rel) => names.has(rel.split('/')[0]))
+    if (candidates.length === 0) return false
+    const hits = await Promise.all(candidates.map((rel) => dirExists(path.join(projectRoot, rel))))
+    return hits.some(Boolean)
+  }
+
   const profilePath = path.join(projectRoot, '.skills-profile.json')
   try {
     const s = await fs.stat(profilePath)
     if (s.isFile()) return true
   } catch {}
-
-  for (const rel of allAgentProjectRelPaths()) {
-    if (await dirExists(path.join(projectRoot, rel))) return true
-  }
-  return false
+  const hits = await Promise.all(rels.map((rel) => dirExists(path.join(projectRoot, rel))))
+  return hits.some(Boolean)
 }
 
 export async function getSavedProjects(): Promise<{ name: string; path: string }[]> {
@@ -362,29 +375,32 @@ async function discoverProjectsRecursively(
     return projects
   }
 
-  if (dir !== homedir && await hasAnyAgentSkills(dir)) {
+  if (dir !== homedir && (await hasAnyAgentSkills(dir, entries))) {
     projects.push({
       name: path.basename(dir),
       path: dir,
     })
   }
 
-  for (const entry of entries) {
-    if (!entry.isDirectory()) continue
+  // Hidden directories are never project roots worth descending into: agent
+  // markers (.claude, .agents, …) are checked directly on each candidate by
+  // hasAnyAgentSkills(). Skipping them avoids walking .git internals, caches,
+  // Obsidian vaults' .obsidian, etc.
+  const subdirs = entries.filter((entry) => {
+    if (!entry.isDirectory()) return false
     const name = entry.name
-    if (
+    return !(
+      name.startsWith('.') ||
       name === 'node_modules' ||
-      name === '.git' ||
       name === 'dist' ||
       name === 'build' ||
       (currentDepth > 0 && name === 'Library')
-    ) {
-      continue
-    }
-    const subPath = path.join(dir, name)
-    const subProjects = await discoverProjectsRecursively(subPath, maxDepth, currentDepth + 1)
-    projects.push(...subProjects)
-  }
+    )
+  })
+  const nested = await mapLimit(subdirs, 8, (entry) =>
+    discoverProjectsRecursively(path.join(dir, entry.name), maxDepth, currentDepth + 1),
+  )
+  for (const sub of nested) projects.push(...sub)
 
   return projects
 }
@@ -651,118 +667,144 @@ function parseExtraPaths(): string[] {
     .map((p) => (p.startsWith('~') ? path.join(homedir, p.slice(1)) : p))
 }
 
-export async function fullScan(): Promise<ScanResult> {
+/**
+ * Coalesce concurrent scans: callers that arrive while a scan is running get
+ * that scan's result — unless something changed on disk since it started
+ * (markScanDirty), in which case a fresh scan runs.
+ */
+let scanGeneration = 0
+let inflight: { gen: number; promise: Promise<ScanResult> } | null = null
+
+export function markScanDirty(): void {
+  scanGeneration++
+}
+
+export function fullScan(): Promise<ScanResult> {
+  if (inflight && inflight.gen === scanGeneration) return inflight.promise
+  const gen = scanGeneration
+  const promise = runFullScan().finally(() => {
+    if (inflight?.promise === promise) inflight = null
+  })
+  inflight = { gen, promise }
+  return promise
+}
+
+async function runFullScan(): Promise<ScanResult> {
   const start = Date.now()
-  const disabledSkills = await getDisabledSkills()
+  const timings: Record<string, number> = {}
+  let phaseStart = start
+  const mark = (phase: string) => {
+    const now = Date.now()
+    timings[phase] = (timings[phase] ?? 0) + (now - phaseStart)
+    phaseStart = now
+  }
+  const ctx = newScanContext(await getDisabledSkills())
   const allSkills: Skill[] = []
   const scannedPaths: ScanPathReport[] = []
 
-  async function scanAndReport(
-    label: string,
-    dir: string,
-    scope: 'global' | 'project' | 'plugin',
-    agent: AgentId,
-    projectName?: string,
-    projectPath?: string,
-  ) {
-    const exists = await dirExists(dir)
-    if (!exists) {
-      scannedPaths.push({ label, path: dir, exists: false, count: 0 })
-      return []
+  interface ScanTask {
+    label: string
+    dir: string
+    scope: 'global' | 'project' | 'plugin'
+    agent: AgentId
+    projectName?: string
+    projectPath?: string
+    warehouse?: boolean
+  }
+
+  /**
+   * Scan many skill directories concurrently, then merge results in task
+   * order: dedupe below is first-wins, so ordering must stay deterministic.
+   */
+  async function runTasks(tasks: ScanTask[]): Promise<Skill[][]> {
+    const results = await mapLimit(tasks, 6, async (t) => {
+      if (!(await dirExists(t.dir))) return { skills: [] as Skill[], report: { label: t.label, path: t.dir, exists: false, count: 0 } }
+      try {
+        const skills = await scanSkillDir(t.dir, t.scope, t.agent, ctx, t.projectName, t.projectPath)
+        if (t.warehouse) for (const ws of skills) ws.isWarehouseSource = true
+        return { skills, report: { label: t.label, path: t.dir, exists: true, count: skills.length } }
+      } catch (e: any) {
+        return { skills: [] as Skill[], report: { label: t.label, path: t.dir, exists: true, count: 0, error: e?.message || String(e) } }
+      }
+    })
+    for (const r of results) {
+      scannedPaths.push(r.report)
+      allSkills.push(...r.skills)
     }
-    try {
-      const skills = await scanSkillDir(dir, scope, agent, projectName, projectPath, disabledSkills)
-      scannedPaths.push({ label, path: dir, exists: true, count: skills.length })
-      return skills
-    } catch (e: any) {
-      scannedPaths.push({
-        label,
-        path: dir,
-        exists: true,
-        count: 0,
-        error: e?.message || String(e),
-      })
-      return []
-    }
+    return results.map((r) => r.skills)
   }
 
   const settings = await readIdeSettingsFull()
   const warehouseDirs = new Set<string>()
-
-  if (settings.customGlobalSkillsDir) {
-    warehouseDirs.add(path.resolve(settings.customGlobalSkillsDir))
-  }
-  if (Array.isArray(settings.skillWarehouses)) {
-    for (const w of settings.skillWarehouses) {
-      if (w && typeof w === 'string') {
-        warehouseDirs.add(path.resolve(w))
-      }
-    }
+  if (settings.customGlobalSkillsDir) warehouseDirs.add(path.resolve(settings.customGlobalSkillsDir))
+  for (const w of settings.skillWarehouses ?? []) {
+    if (w && typeof w === 'string') warehouseDirs.add(path.resolve(w))
   }
 
-  for (const warehouseDir of warehouseDirs) {
-    const warehouseSkills = await scanAndReport(
-      `warehouse:${path.basename(warehouseDir)}`,
-      warehouseDir,
-      'global',
-      'universal',
-    )
-    for (const ws of warehouseSkills) {
-      ws.isWarehouseSource = true
-    }
-    allSkills.push(...warehouseSkills)
-  }
+  // 0. Warehouses first: they are the canonical copies for dedupe.
+  await runTasks(
+    [...warehouseDirs].map((dir) => ({
+      label: `warehouse:${path.basename(dir)}`,
+      dir,
+      scope: 'global' as const,
+      agent: 'universal' as AgentId,
+      warehouse: true,
+    })),
+  )
+  mark('warehouses')
 
-  // 1. Global skills — loop over every agent's global paths
-  for (const { agent, path: globalDir } of allAgentGlobalAbsPaths(homedir)) {
-    allSkills.push(
-      ...(await scanAndReport(`global:${agent.id}`, globalDir, 'global', agent.id)),
-    )
-  }
+  // 1. Global skills — every agent's global paths
+  await runTasks(
+    allAgentGlobalAbsPaths(homedir).map(({ agent, path: dir }) => ({
+      label: `global:${agent.id}`,
+      dir,
+      scope: 'global' as const,
+      agent: agent.id,
+    })),
+  )
+  mark('globals')
 
   // 2. Plugin skills — Claude Code only for now
-  const pluginSkillDirs = await discoverPluginSkillDirs()
-  for (const pluginDir of pluginSkillDirs) {
-    const pluginName = path.relative(path.join(homedir, '.claude', 'plugins'), pluginDir)
-    allSkills.push(
-      ...(await scanAndReport(`plugin:${pluginName}`, pluginDir, 'plugin', 'claude-code')),
-    )
-  }
+  const pluginRoot = path.join(homedir, '.claude', 'plugins')
+  await runTasks(
+    (await discoverPluginSkillDirs()).map((dir) => ({
+      label: `plugin:${path.relative(pluginRoot, dir)}`,
+      dir,
+      scope: 'plugin' as const,
+      agent: 'claude-code' as AgentId,
+    })),
+  )
+  mark('plugins')
 
   // 3. Project skills — for each project, scan every agent's project paths
   const discoveredProjects = await discoverProjects()
-  const projects: Project[] = []
-
-  for (const proj of discoveredProjects) {
-    let projectTotal = 0
+  mark('discoverProjects')
+  const projectTasks: (ScanTask & { projIndex: number })[] = []
+  discoveredProjects.forEach((proj, projIndex) => {
     for (const agent of AGENTS) {
       for (const rel of agent.projectPaths) {
-        const skillsDir = path.join(proj.path, rel)
-        const projectSkills = await scanAndReport(
-          `project:${proj.name}:${agent.id}`,
-          skillsDir,
-          'project',
-          agent.id,
-          proj.name,
-          proj.path,
-        )
-        allSkills.push(...projectSkills)
-        projectTotal += projectSkills.length
+        projectTasks.push({
+          label: `project:${proj.name}:${agent.id}`,
+          dir: path.join(proj.path, rel),
+          scope: 'project',
+          agent: agent.id,
+          projectName: proj.name,
+          projectPath: proj.path,
+          projIndex,
+        })
       }
     }
-    projects.push({
-      name: proj.name,
-      path: proj.path,
-      skillCount: projectTotal,
-    })
-  }
+  })
+  const projectResults = await runTasks(projectTasks)
+  const projectTotals = new Array(discoveredProjects.length).fill(0)
+  projectResults.forEach((skills, i) => (projectTotals[projectTasks[i].projIndex] += skills.length))
+  const projects: Project[] = discoveredProjects.map((proj, i) => ({ name: proj.name, path: proj.path, skillCount: projectTotals[i] }))
+  mark('projects')
 
   // 4. Extra paths from SKILL_HUB_EXTRA_PATHS — agent unknown
-  for (const extra of parseExtraPaths()) {
-    allSkills.push(
-      ...(await scanAndReport(`extra:${path.basename(extra)}`, extra, 'project', 'unknown')),
-    )
-  }
+  await runTasks(
+    parseExtraPaths().map((dir) => ({ label: `extra:${path.basename(dir)}`, dir, scope: 'project' as const, agent: 'unknown' as AgentId })),
+  )
 
   // Deduplicate by realPath & originPath (supports symlinks and materialized copy markers)
   const seenByRealPath = new Map<string, Skill>()
@@ -843,6 +885,7 @@ export async function fullScan(): Promise<ScanResult> {
   }
 
   const dedupedSkills: Skill[] = Array.from(new Set(seenByRealPath.values()))
+  mark('dedupe+drift')
 
   // isGlobalActive: the skill is in the distribution state's global set.
   try {
@@ -854,13 +897,16 @@ export async function fullScan(): Promise<ScanResult> {
   } catch {}
 
   const conflicts = detectConflicts(dedupedSkills)
+  mark('globalSet+conflicts')
 
   // Classify skills into categories + generate merge suggestions
   const { skills: classifiedSkills, categories, mergeSuggestions, byCategory } =
     classifyAll(dedupedSkills)
 
+  mark('classify')
   // Similarity detection (used by health check)
   const similarGroups = detectSimilarSkills(classifiedSkills)
+  mark('similarity')
 
   // Health diagnostics
   const health = computeHealth(
@@ -871,6 +917,7 @@ export async function fullScan(): Promise<ScanResult> {
     mergeSuggestions,
   )
 
+  mark('health')
   const bySource: Record<string, number> = {}
   const byAgent: Record<string, number> = {}
   for (const s of classifiedSkills) {
@@ -899,5 +946,6 @@ export async function fullScan(): Promise<ScanResult> {
     },
     scannedPaths,
     durationMs: Date.now() - start,
+    timings,
   }
 }

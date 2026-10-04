@@ -28,7 +28,8 @@ export interface Skill {
   projectName?: string
   projectPath?: string
   frontmatter: Record<string, any>
-  content: string
+  /** Only present on the detail endpoint; list payloads omit it. */
+  content?: string
   files: string[]
   enabled: boolean
   hasConflict: boolean
@@ -83,11 +84,13 @@ export function useSkills() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const scan = useCallback(async () => {
+  // force=false serves the server's cache (invalidated by file changes and
+  // every mutation); the manual scan button forces a rescan.
+  const scan = useCallback(async (force = false) => {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/scan')
+      const res = await fetch(force ? '/api/scan?force=1' : '/api/scan')
       if (!res.ok) throw new Error('Scan failed')
       const data = await res.json()
       setAllSkills(data.skills)

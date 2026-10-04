@@ -418,7 +418,7 @@ function App() {
 
                   {/* Scan Button */}
                   <button
-                    onClick={scan}
+                    onClick={() => scan(true)}
                     disabled={loading}
                     className="px-3 py-1.5 bg-indigo-600 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
                   >

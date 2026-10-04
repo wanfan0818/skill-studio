@@ -99,10 +99,32 @@ export async function writeSkillSource(skillRealPath: string, source: SkillGithu
   }
 }
 
+/** Per-scan memo of parsed manifest files (path → parsed JSON or null). */
+export type ManifestCache = Map<string, Promise<any | null>>
+
+function readJsonCached(file: string, cache?: ManifestCache): Promise<any | null> {
+  const load = () =>
+    fs.readFile(file, 'utf-8').then(
+      (raw) => {
+        try {
+          return JSON.parse(raw)
+        } catch {
+          return null
+        }
+      },
+      () => null,
+    )
+  if (!cache) return load()
+  let hit = cache.get(file)
+  if (!hit) cache.set(file, (hit = load()))
+  return hit
+}
+
 export async function findSourceInManifests(
   skillName: string,
   skillRealPath: string,
-  projectPath?: string
+  projectPath?: string,
+  cache?: ManifestCache,
 ): Promise<{ owner: string; repo: string; branch: string; subPath: string; installedCommit?: string } | null> {
   const searchDirs = new Set<string>()
 
@@ -133,8 +155,7 @@ export async function findSourceInManifests(
     for (const file of lockFiles) {
       const lockPath = path.join(dir, file)
       try {
-        const lockContent = await fs.readFile(lockPath, 'utf-8')
-        const lockData = JSON.parse(lockContent)
+        const lockData = await readJsonCached(lockPath, cache)
         if (lockData && lockData.skills && lockData.skills[skillName]) {
           const entry = lockData.skills[skillName]
           if (entry.sourceType === 'github' || !entry.sourceType) {
@@ -168,8 +189,7 @@ export async function findSourceInManifests(
     for (const file of manifestFiles) {
       const manifestPath = path.join(dir, file)
       try {
-        const manifestContent = await fs.readFile(manifestPath, 'utf-8')
-        const manifestData = JSON.parse(manifestContent)
+        const manifestData = await readJsonCached(manifestPath, cache)
         if (manifestData && Array.isArray(manifestData.skills)) {
           const entry = manifestData.skills.find((s: any) => s.name === skillName)
           if (entry && (entry.source || entry.sourceUrl)) {

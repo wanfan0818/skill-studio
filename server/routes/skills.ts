@@ -2,7 +2,7 @@ import type { FastifyInstance } from 'fastify'
 import os from 'os'
 import fs from 'fs/promises'
 import path from 'path'
-import { fullScan } from '../scanner/discovery.js'
+import { fullScan, markScanDirty } from '../scanner/discovery.js'
 import { AGENTS } from '../scanner/agents.js'
 import type { ScanResult, Skill } from '../types.js'
 
@@ -12,11 +12,35 @@ export function getCachedResult(): ScanResult | null {
   return cachedResult
 }
 
+/**
+ * List payloads omit each skill's full SKILL.md text (≈60% of the bytes);
+ * the detail endpoint /api/skills/:id returns it on demand.
+ */
+function withoutContent(skill: Skill): Skill {
+  const { content: _content, ...rest } = skill
+  return rest as Skill
+}
+
+export function toListPayload(result: ScanResult) {
+  return {
+    ...result,
+    skills: result.skills.map(withoutContent),
+    conflicts: result.conflicts.map((c) => ({ ...c, skills: c.skills.map(withoutContent) })),
+  }
+}
+
+async function getScan(force = false): Promise<ScanResult> {
+  if (force || !cachedResult) cachedResult = await fullScan()
+  return cachedResult
+}
+
 export async function skillRoutes(app: FastifyInstance) {
-  // Trigger full scan
-  app.get('/api/scan', async () => {
-    cachedResult = await fullScan()
-    return cachedResult
+  // Scan results. Served from cache (invalidated by file watcher events and
+  // every mutating endpoint); `?force=1` rescans unconditionally.
+  app.get<{ Querystring: { force?: string } }>('/api/scan', async (req) => {
+    const force = req.query.force === '1' || req.query.force === 'true'
+    if (force) markScanDirty()
+    return toListPayload(await getScan(force))
   })
 
   // Get all skills (with optional filters)
@@ -51,7 +75,7 @@ export async function skillRoutes(app: FastifyInstance) {
       )
     }
 
-    return { skills, stats: cachedResult.stats }
+    return { skills: skills.map(withoutContent), stats: cachedResult.stats }
   })
 
   // Get single skill detail
@@ -77,7 +101,7 @@ export async function skillRoutes(app: FastifyInstance) {
     if (!cachedResult) {
       cachedResult = await fullScan()
     }
-    return cachedResult.conflicts
+    return toListPayload(cachedResult).conflicts
   })
 
   // Get stats
@@ -105,6 +129,7 @@ export async function skillRoutes(app: FastifyInstance) {
       },
       scan: {
         durationMs: cachedResult.durationMs,
+        timings: cachedResult.timings,
         totalSkills: cachedResult.stats.total,
         scannedPaths: cachedResult.scannedPaths,
       },
@@ -183,4 +208,5 @@ export async function findKnownSkill(match: { id?: string; path?: string }): Pro
 
 export function invalidateCache() {
   cachedResult = null
+  markScanDirty()
 }
