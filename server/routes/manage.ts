@@ -8,239 +8,43 @@ import { isInside, isPlainSegment, readJsonFile, writeFileAtomic } from '../util
 import { createSnapshot } from '../versioning/store.js'
 import { moveToTrash } from '../trash/store.js'
 import { AGENTS, agentGlobalPaths } from '../scanner/agents.js'
-import type { Skill } from '../types.js'
 import { discoverProjects, fullScan } from '../scanner/discovery.js'
+import { readIdeSettingsFull, writeIdeSettingsFull, getWarehouseDirs, type AppSettings } from '../settings.js'
+import { readDistribution, updateDistribution, setSkillForAgent, desiredNames } from '../distribution/state.js'
+import { inspect, plan } from '../distribution/reconcile.js'
+import { withWriteLock } from '../distribution/lock.js'
+import { applyScoped, distributableAgents, setSkillAgents, skillDistributionStatus } from './distribution.js'
 
 const homedir = os.homedir()
 const settingsPath = path.join(homedir, '.claude', 'settings.json')
-const ideConfigPath = path.join(homedir, '.config', 'skill-studio', 'ide-settings.json')
 
-export let isSyncingSymlinks = false
-export function setSyncingSymlinks(val: boolean) {
-  isSyncingSymlinks = val
-}
-
-export interface AppSettings {
-  enabledAgentIds: string[]
-  customGlobalSkillsDir?: string
-  skillWarehouses?: string[]
-  githubToken?: string // Added for GitHub API authentication
-  httpProxy?: string // Added for network proxy configuration
-  skillOverrides?: Record<string, { disabledIdes?: string[] }>
-}
-
-export async function readIdeSettingsFull(): Promise<AppSettings> {
-  // Missing file → first run, bootstrap below. Malformed / unreadable file →
-  // throw. Falling back to defaults here used to overwrite the user's token,
-  // warehouses and per-skill overrides with a freshly detected config.
-  const parsed = await readJsonFile<any>(ideConfigPath)
-  if (parsed !== undefined) {
-    const enabledAgentIds = Array.isArray(parsed.enabledAgentIds) ? parsed.enabledAgentIds : []
-    const customGlobalSkillsDir = typeof parsed.customGlobalSkillsDir === 'string' && parsed.customGlobalSkillsDir.trim() !== ''
-      ? parsed.customGlobalSkillsDir
-      : undefined
-    const skillWarehouses = Array.isArray(parsed.skillWarehouses)
-      ? parsed.skillWarehouses.filter((w: unknown) => typeof w === 'string' && w.trim() !== '').map((w: string) => w.trim())
-      : undefined
-    const githubToken = typeof parsed.githubToken === 'string' ? parsed.githubToken : undefined
-    const httpProxy = typeof parsed.httpProxy === 'string' ? parsed.httpProxy : undefined
-    const skillOverrides = parsed.skillOverrides && typeof parsed.skillOverrides === 'object' ? parsed.skillOverrides : undefined
-    return { enabledAgentIds, customGlobalSkillsDir, skillWarehouses, githubToken, httpProxy, skillOverrides }
-  }
-
-  const initialEnabled: string[] = ['claude-code']
-  try {
-    for (const agent of AGENTS) {
-      if (!agent.globalPaths || agent.globalPaths.length === 0 || agent.id === 'universal') continue
-      let detected = false
-      for (const globalPath of agentGlobalPaths(agent, homedir)) {
-        try {
-          await fs.access(globalPath)
-          detected = true
-          break
-        } catch {}
-      }
-      if (detected && !initialEnabled.includes(agent.id)) {
-        initialEnabled.push(agent.id)
-      }
-    }
-    await writeIdeSettingsFull({ enabledAgentIds: initialEnabled })
-    return { enabledAgentIds: initialEnabled }
-  } catch {
-    return { enabledAgentIds: [] }
-  }
-}
-
-export async function writeIdeSettingsFull(settings: AppSettings): Promise<void> {
-  // 0600: this file holds the GitHub token.
-  await writeFileAtomic(ideConfigPath, JSON.stringify(settings, null, 2), { mode: 0o600 })
-}
-
-export async function readIdeSettings(): Promise<string[]> {
-  const settings = await readIdeSettingsFull()
-  return settings.enabledAgentIds
-}
-
-export async function writeIdeSettings(enabledAgentIds: string[]): Promise<void> {
-  const settings = await readIdeSettingsFull()
-  settings.enabledAgentIds = enabledAgentIds
-  await writeIdeSettingsFull(settings)
-}
-
-export async function ensureEnabledIdesSymlinks(skills: Skill[]): Promise<void> {
-  setSyncingSymlinks(true)
-
-  try {
-    const settings = await readIdeSettingsFull()
-    const enabledAgentIds = settings.enabledAgentIds
-
-    for (const agent of AGENTS) {
-      if (!agent.globalPaths || agent.globalPaths.length === 0 || agent.id === 'universal') continue
-
-      const shouldBeEnabled = enabledAgentIds.includes(agent.id)
-      // User-scoped agents (e.g. TeleAgent) expand to one directory per
-      // account; every static agent yields exactly one path.
-      const globalPaths = agentGlobalPaths(agent, homedir)
-
-      if (shouldBeEnabled) {
-        for (const globalPath of globalPaths) {
-          await fs.mkdir(globalPath, { recursive: true })
-
-          for (const skill of skills) {
-            const targetLinkPath = path.join(globalPath, skill.name)
-
-            // 检查此技能的配置，如果在该 IDE 下被禁用，强制删除且不予建立软链接
-            const overrides = settings.skillOverrides?.[skill.name]
-            const isOverrideDisabled = overrides?.disabledIdes?.includes(agent.id)
-
-            if (isOverrideDisabled) {
-              try {
-                const lstat = await fs.lstat(targetLinkPath)
-                if (lstat.isSymbolicLink()) {
-                  await fs.unlink(targetLinkPath)
-                }
-              } catch {}
-              continue
-            }
-
-            let resolvedRealPath: string
-            try {
-              resolvedRealPath = await fs.realpath(skill.realPath)
-            } catch {
-              resolvedRealPath = path.resolve(skill.realPath)
-            }
-
-            if (path.resolve(targetLinkPath) === resolvedRealPath) {
-              continue
-            }
-
-            let exists = false
-            let isSymlink = false
-            let currentTarget = ''
-
-            try {
-              const lstat = await fs.lstat(targetLinkPath)
-              exists = true
-              isSymlink = lstat.isSymbolicLink()
-              if (isSymlink) {
-                currentTarget = await fs.readlink(targetLinkPath)
-              }
-            } catch {
-              exists = false
-            }
-
-            if (exists) {
-              if (isSymlink) {
-                let resolvedTarget: string
-                try {
-                  resolvedTarget = await fs.realpath(path.resolve(globalPath, currentTarget))
-                } catch {
-                  resolvedTarget = path.resolve(globalPath, currentTarget)
-                }
-
-                if (resolvedTarget === resolvedRealPath) {
-                  continue
-                }
-              } else {
-                continue
-              }
-            }
-
-            try {
-              await fs.unlink(targetLinkPath)
-            } catch {}
-
-            try {
-              await fs.symlink(resolvedRealPath, targetLinkPath, 'dir')
-            } catch (err: any) {
-              console.error(`[ide-sync] Failed to create symlink for ${skill.name} in ${agent.name}:`, err)
-            }
-          }
-        }
-      } else {
-        // Deliberately NO destructive cleanup in this branch.
-        //
-        // This used to unlink every symlink inside a non-enabled agent's global
-        // directory. Since ensureEnabledIdesSymlinks() runs at the end of every
-        // fullScan() — i.e. on page load, project save, skill toggle and settings
-        // write — "this agent is not enabled" silently meant "delete whatever
-        // lives in this agent's skill directory".
-        //
-        // That is exactly what happened to WorkBuddy AI. ~/.workbuddy-ai/skills
-        // held 204 symlinks into the skill warehouse; the moment `workbuddy-ai`
-        // joined AGENTS while still absent from enabledAgentIds, the next scan
-        // wiped them and the user's WorkBuddy AI skill list collapsed to the
-        // three real directories that remained.
-        //
-        // Cleanup is now an explicit, narrowly-scoped action: pruneAgentSymlinks()
-        // below, called only when the user actually turns an agent off.
-      }
-    }
-  } finally {
-    // 延迟 1.5 秒复位锁，以确保操作系统异步 I/O 文件事件全部抛出并过去
-    setTimeout(() => {
-      setSyncingSymlinks(false)
-    }, 1500)
-  }
-}
+// App settings moved to ../settings.ts; re-exported for existing importers.
+export { readIdeSettingsFull, writeIdeSettingsFull }
+export type { AppSettings }
 
 /**
- * Remove the symlinks Skill Studio manages inside ONE agent's global skill
- * directory. Called only when the user explicitly disables that agent.
- *
- * Scope is deliberately narrow: only this one agent's directories are touched,
- * so switching Cursor off can never disturb Codex, and an agent the user never
- * enabled is never touched at all.
+ * Move a real skill directory that sits inside an agent's global dir into the
+ * warehouse and leave a symlink in its place, so the agent keeps working and
+ * the skill becomes distributable. If the agent has a distribution rule that
+ * would not include the skill, it is added to that agent's `include` so the
+ * next apply doesn't unlink it.
  */
-export async function pruneAgentSymlinks(agentId: string): Promise<void> {
-  const agent = AGENTS.find((a) => a.id === agentId)
-  if (!agent || agent.globalPaths.length === 0) return
-
-  setSyncingSymlinks(true)
+async function adoptIntoWarehouse(entryPath: string, warehouse: string): Promise<string> {
+  const name = path.basename(entryPath)
+  let dest = path.join(warehouse, name)
   try {
-    for (const globalPath of agentGlobalPaths(agent, homedir)) {
-      let entries: import('fs').Dirent[]
-      try {
-        entries = await fs.readdir(globalPath, { withFileTypes: true })
-      } catch {
-        continue
-      }
-
-      for (const entry of entries) {
-        const entryPath = path.join(globalPath, entry.name)
-        try {
-          const stat = await fs.lstat(entryPath)
-          if (stat.isSymbolicLink()) {
-            await fs.unlink(entryPath)
-          }
-        } catch {}
-      }
-    }
-  } finally {
-    setTimeout(() => {
-      setSyncingSymlinks(false)
-    }, 1500)
+    await fs.access(dest)
+    dest = path.join(warehouse, `${name}_adopted_${Date.now()}`)
+  } catch {}
+  await fs.mkdir(warehouse, { recursive: true })
+  try {
+    await fs.rename(entryPath, dest)
+  } catch {
+    await copyDir(entryPath, dest)
+    await moveToTrash(entryPath, name)
   }
+  await fs.symlink(dest, entryPath, 'dir')
+  return dest
 }
 
 /**
@@ -470,77 +274,71 @@ export async function syncProjectSkills(
 }
 
 export async function manageRoutes(app: FastifyInstance) {
-  // Get Skill associations across IDEs and local Projects
+  // Skill × IDE (global distribution) and Skill × project associations
   app.get<{
     Params: { name: string }
-  }>('/api/skills/:name/association', async (req) => {
-    const { name } = req.params
-    const settings = await readIdeSettingsFull()
-    const skillOverrides = settings.skillOverrides?.[name] || {}
-    const disabledIdes = skillOverrides.disabledIdes || []
-
-    const idesList = AGENTS.filter(a => a.globalPaths && a.globalPaths.length > 0 && a.id !== 'universal').map(agent => {
-      const isEnabledInSettings = settings.enabledAgentIds.includes(agent.id)
-      const isDisabledByOverride = disabledIdes.includes(agent.id)
-      return {
-        id: agent.id,
-        name: agent.name,
-        enabled: isEnabledInSettings && !isDisabledByOverride,
-        linked: isEnabledInSettings && !isDisabledByOverride
-      }
-    })
-
-    const allProjects = await discoverProjects()
-    const projectsList = []
-
-    for (const proj of allProjects) {
-      const profilePath = path.join(proj.path, '.skills-profile.json')
-      let hasSkill = false
-      try {
-        const raw = await fs.readFile(profilePath, 'utf-8')
-        const profile = JSON.parse(raw)
-        if (profile && Array.isArray(profile.skills)) {
-          hasSkill = profile.skills.includes(name)
-        }
-      } catch {}
-
-      projectsList.push({
-        name: proj.name,
-        path: proj.path,
-        enabled: hasSkill,
-        linked: hasSkill
-      })
-    }
-
-    return {
-      name,
-      ides: idesList,
-      projects: projectsList
-    }
-  })
-
-  // Save Skill association settings & apply changes to IDEs and Projects
-  app.post<{
-    Params: { name: string }
-    Body: { disabledIdes: string[]; enabledProjectPaths: string[] }
   }>('/api/skills/:name/association', async (req, reply) => {
     const { name } = req.params
-    const { disabledIdes, enabledProjectPaths } = req.body ?? ({} as any)
+    if (!isPlainSegment(name)) {
+      reply.status(400)
+      return { ok: false, error: '参数不合法' }
+    }
+    const { distributable, ides } = await skillDistributionStatus(name)
+
+    const projectsList = []
+    for (const proj of await discoverProjects()) {
+      let hasSkill = false
+      try {
+        const profile = JSON.parse(await fs.readFile(path.join(proj.path, '.skills-profile.json'), 'utf-8'))
+        hasSkill = Array.isArray(profile?.skills) && profile.skills.includes(name)
+      } catch {}
+      projectsList.push({ name: proj.name, path: proj.path, enabled: hasSkill, linked: hasSkill })
+    }
+
+    return { name, distributable, ides, projects: projectsList }
+  })
+
+  // Save associations. IDE part edits the distribution state and applies
+  // only this skill's changes; project part edits project profiles.
+  app.post<{
+    Params: { name: string }
+    Body: { ides?: Record<string, boolean>; disabledIdes?: string[]; enabledProjectPaths: string[] }
+  }>('/api/skills/:name/association', async (req, reply) => {
+    const { name } = req.params
+    const { ides, disabledIdes, enabledProjectPaths } = req.body ?? ({} as any)
     if (
       !isPlainSegment(name) ||
-      !Array.isArray(disabledIdes) || !disabledIdes.every((x) => typeof x === 'string') ||
       !Array.isArray(enabledProjectPaths) ||
-      !enabledProjectPaths.every((p) => typeof p === 'string' && path.isAbsolute(p))
+      !enabledProjectPaths.every((p: unknown) => typeof p === 'string' && path.isAbsolute(p))
     ) {
       reply.status(400)
       return { ok: false, error: '参数不合法' }
     }
 
-    // 1. Update global IDE overrides
-    const settings = await readIdeSettingsFull()
-    if (!settings.skillOverrides) settings.skillOverrides = {}
-    settings.skillOverrides[name] = { disabledIdes }
-    await writeIdeSettingsFull(settings)
+    // 1. IDE distribution
+    const status = await skillDistributionStatus(name)
+    let wanted: Record<string, boolean> | undefined
+    if (ides && typeof ides === 'object') {
+      wanted = ides
+    } else if (Array.isArray(disabledIdes)) {
+      // Legacy body shape: everything listed as enabled unless disabled.
+      wanted = Object.fromEntries(status.ides.filter((i) => i.managed).map((i) => [i.id, !disabledIdes.includes(i.id)]))
+    }
+    let distribution = null
+    if (wanted) {
+      const changes: Record<string, boolean> = {}
+      for (const ide of status.ides) {
+        if (ide.id in wanted && !!wanted[ide.id] !== ide.enabled) changes[ide.id] = !!wanted[ide.id]
+      }
+      if (Object.keys(changes).length) {
+        const r = await setSkillAgents(name, changes)
+        if (!r.ok) {
+          reply.status(400)
+          return r
+        }
+        distribution = await applyScoped({ skills: [name] })
+      }
+    }
 
     // 2. Fetch skillsMap. We ONLY scan once.
     const scanRes = await fullScan()
@@ -595,14 +393,8 @@ export async function manageRoutes(app: FastifyInstance) {
       }
     }
 
-    // 4. Force sync IDE globally for this single skill only, avoiding second fullScan
-    if (targetSkill) {
-      await ensureEnabledIdesSymlinks([targetSkill])
-    }
-    
     invalidateCache()
-
-    return { ok: true }
+    return { ok: true, distribution }
   })
 
   // Toggle skill enabled/disabled
@@ -869,190 +661,12 @@ export async function manageRoutes(app: FastifyInstance) {
     return { ok: failCount === 0, okCount, failCount, results }
   })
 
-  // Get sync status across IDEs for a skill
-  app.get<{
-    Params: { id: string }
-    Querystring: { realPath: string; name: string }
-  }>('/api/skills/:id/agents', async (req, reply) => {
-    const { realPath, name } = req.query
-    if (!isPlainSegment(name) || typeof realPath !== 'string') {
-      reply.status(400)
-      return { ok: false, error: '参数不合法' }
-    }
-
-    let resolvedRealPath: string
-    try {
-      resolvedRealPath = await fs.realpath(realPath)
-    } catch {
-      resolvedRealPath = path.resolve(realPath)
-    }
-
-    const results = []
-    const enabledAgentIds = await readIdeSettings()
-
-    for (const agent of AGENTS) {
-      if (!agent.globalPaths || agent.globalPaths.length === 0) continue
-
-      // A user-scoped agent (e.g. TeleAgent) has one directory per account, so
-      // probe each of them and report the strongest match: a directory that
-      // already links this skill wins over an empty one.
-      const candidates: {
-        enabled: boolean
-        isRealLocation: boolean
-        targetLinkPath: string
-      }[] = []
-
-      for (const globalPath of agentGlobalPaths(agent, homedir)) {
-        const targetLinkPath = path.join(globalPath, name)
-
-        let resolvedLinkPath = ''
-        let exists = false
-        let isSymlink = false
-
-        try {
-          const lstat = await fs.lstat(targetLinkPath)
-          exists = true
-          isSymlink = lstat.isSymbolicLink()
-          if (isSymlink) {
-            const target = await fs.readlink(targetLinkPath)
-            resolvedLinkPath = path.resolve(globalPath, target)
-          } else {
-            resolvedLinkPath = await fs.realpath(targetLinkPath)
-          }
-        } catch {
-          exists = false
-        }
-
-        const isRealLocation = path.resolve(targetLinkPath) === resolvedRealPath
-        const enabled =
-          isRealLocation || (exists && isSymlink && resolvedLinkPath === resolvedRealPath)
-
-        candidates.push({ enabled, isRealLocation, targetLinkPath })
-      }
-
-      if (candidates.length === 0) continue
-      const chosen = candidates.find((c) => c.enabled) ?? candidates[0]
-
-      results.push({
-        id: agent.id,
-        name: agent.name,
-        icon: agent.icon,
-        enabled: chosen.enabled,
-        isRealLocation: chosen.isRealLocation,
-        targetLinkPath: chosen.targetLinkPath,
-        globallyEnabled: enabledAgentIds.includes(agent.id),
-      })
-    }
-
-    return { ok: true, agents: results }
-  })
-
-  // Sync symlinks across IDEs for a skill
-  app.post<{
-    Params: { id: string }
-    Body: { realPath: string; name: string; enabledAgentIds: string[] }
-  }>('/api/skills/:id/agents/sync', async (req, reply) => {
-    const { realPath, name, enabledAgentIds } = req.body ?? ({} as any)
-    if (!isPlainSegment(name) || !Array.isArray(enabledAgentIds) || typeof realPath !== 'string') {
-      reply.status(400)
-      return { ok: false, error: '参数不合法' }
-    }
-    if (!(await findKnownSkill({ path: realPath }))) {
-      reply.status(404)
-      return { ok: false, error: '不是已发现的 Skill' }
-    }
-
-    let resolvedRealPath: string
-    try {
-      resolvedRealPath = await fs.realpath(realPath)
-    } catch {
-      resolvedRealPath = path.resolve(realPath)
-    }
-
-    const results = []
-
-    for (const agent of AGENTS) {
-      if (!agent.globalPaths || agent.globalPaths.length === 0) continue
-
-      const shouldBeEnabled = enabledAgentIds.includes(agent.id)
-      const globalPaths = agentGlobalPaths(agent, homedir)
-
-      // One aggregate result per agent, even when it owns several
-      // directories (user-scoped agents), so the UI never shows the same
-      // agent twice.
-      let acted = false
-      let failure: string | null = null
-
-      for (const globalPath of globalPaths) {
-        const targetLinkPath = path.join(globalPath, name)
-
-        if (path.resolve(targetLinkPath) === resolvedRealPath) {
-          continue
-        }
-
-        let exists = false
-        let isSymlink = false
-        let currentTarget = ''
-
-        try {
-          const lstat = await fs.lstat(targetLinkPath)
-          exists = true
-          isSymlink = lstat.isSymbolicLink()
-          if (isSymlink) {
-            currentTarget = await fs.readlink(targetLinkPath)
-          }
-        } catch {
-          exists = false
-        }
-
-        if (shouldBeEnabled) {
-          if (exists) {
-            if (isSymlink) {
-              const resolvedTarget = path.resolve(globalPath, currentTarget)
-              if (resolvedTarget === resolvedRealPath) {
-                continue
-              }
-              await fs.unlink(targetLinkPath)
-            } else {
-              failure = failure || '目标路径已存在真实文件夹，未覆盖。'
-              continue
-            }
-          }
-
-          try {
-            await fs.mkdir(globalPath, { recursive: true })
-            await fs.symlink(resolvedRealPath, targetLinkPath, 'dir')
-            acted = true
-          } catch (err: any) {
-            failure = failure || err.message
-          }
-        } else {
-          if (exists && isSymlink) {
-            const resolvedTarget = path.resolve(globalPath, currentTarget)
-            if (resolvedTarget === resolvedRealPath) {
-              await fs.unlink(targetLinkPath)
-              acted = true
-            }
-          }
-        }
-      }
-
-      if (failure) {
-        results.push({ agentId: agent.id, success: false, error: failure })
-      } else if (acted) {
-        results.push({ agentId: agent.id, success: true })
-      }
-    }
-
-    invalidateCache()
-    return { ok: true, results }
-  })
-
   // GET /api/symlinks/anomalies - Detect anomalous skill directories and symlink stats
   app.get('/api/symlinks/anomalies', async () => {
     const anomalies = []
     const stats = []
-    const enabledAgentIds = await readIdeSettings()
+    const dist = await readDistribution()
+    const warehouseReals = await Promise.all((await getWarehouseDirs()).map((w) => fs.realpath(w).catch(() => path.resolve(w))))
 
     for (const agent of AGENTS) {
       if (!agent.globalPaths || agent.globalPaths.length === 0) continue
@@ -1066,6 +680,9 @@ export async function manageRoutes(app: FastifyInstance) {
       // User-scoped agents own one directory per account: aggregate their
       // counts into a single stat row and show the first dir as representative.
       for (const globalPath of globalPaths) {
+        // An agent dir that IS a warehouse holds the source skills themselves.
+        const realGlobal = await fs.realpath(globalPath).catch(() => path.resolve(globalPath))
+        if (warehouseReals.some((w) => realGlobal === w || realGlobal.startsWith(w + path.sep))) continue
         try {
           await fs.access(globalPath)
           exists = true
@@ -1100,127 +717,111 @@ export async function manageRoutes(app: FastifyInstance) {
         realCount,
         globalPath: globalPaths[0] || '',
         exists,
-        enabled: enabledAgentIds.includes(agent.id),
+        enabled: dist.agents[agent.id]?.mode === 'all',
+        mode: dist.agents[agent.id]?.mode ?? null,
       })
     }
 
     return { ok: true, anomalies, stats }
   })
 
-  // POST /api/ide/toggle - Toggle global sharing for an IDE
+  // POST /api/ide/toggle — legacy switch kept for compatibility:
+  // on → mode 'all', off → mode 'off'. Only the desired state changes; the
+  // response carries the preview and nothing touches disk until apply.
   app.post<{
     Body: { agentId: string; enabled: boolean }
   }>('/api/ide/toggle', async (req, reply) => {
-    const { agentId, enabled } = req.body
-    if (!agentId) {
-      reply.status(400)
-      return { ok: false, error: '未提供 agentId' }
-    }
-
-    const agent = AGENTS.find((a) => a.id === agentId)
-    if (!agent || !agent.globalPaths || agent.globalPaths.length === 0) {
+    const { agentId, enabled } = req.body ?? ({} as any)
+    if (!distributableAgents().some((a) => a.id === agentId) || agentId === 'universal') {
       reply.status(400)
       return { ok: false, error: '无效或不支持的 Agent ID' }
     }
-
-    const enabledAgentIds = await readIdeSettings()
-    let newEnabledIds = [...enabledAgentIds]
-    if (enabled) {
-      if (!newEnabledIds.includes(agentId)) {
-        newEnabledIds.push(agentId)
-      }
-    } else {
-      newEnabledIds = newEnabledIds.filter((id) => id !== agentId)
-    }
-    await writeIdeSettings(newEnabledIds)
-
-    // Turning an agent OFF is the one and only moment we are allowed to remove
-    // symlinks — and only from that agent's own directories.
-    if (!enabled) await pruneAgentSymlinks(agentId)
-
-    const { fullScan } = await import('../scanner/discovery.js')
-    const scanRes = await fullScan()
-    
-    await ensureEnabledIdesSymlinks(scanRes.skills)
-
-    invalidateCache()
-    return { ok: true, enabledAgentIds: newEnabledIds }
+    const state = await updateDistribution((s) => {
+      s.agents[agentId] = { ...s.agents[agentId], mode: enabled ? 'all' : 'off' }
+    })
+    return { ok: true, state, plan: await plan({ agentIds: [agentId] }) }
   })
 
-  // POST /api/symlinks/anomalies/fix - One-click fix to move anomalies to shared location and symlink them back
+  // POST /api/symlinks/anomalies/fix — adopt real skill dirs found in agent
+  // global dirs into the primary warehouse, leaving symlinks behind.
   app.post<{
     Body: { targets?: { name: string; path: string; agentId: string }[] }
   }>('/api/symlinks/anomalies/fix', async (req) => {
-    const targets = req.body?.targets || []
-    const settings = await readIdeSettingsFull()
-    const realGlobalBase = settings.customGlobalSkillsDir || path.join(homedir, '.agents', 'skills')
-
-    await fs.mkdir(realGlobalBase, { recursive: true })
-    const results = []
-    let fixedCount = 0
-
-    const agentRoots = AGENTS.filter((a) => a.id !== 'universal').flatMap((a) => agentGlobalPaths(a, homedir))
-    let itemsToFix: { name: string; path: string; agentId: string }[] = []
-    for (const t of Array.isArray(targets) ? targets : []) {
-      if (!t || !isPlainSegment(t.name) || typeof t.path !== 'string' || path.basename(t.path) !== t.name) continue
-      const parent = path.dirname(t.path)
-      if (agentRoots.some((root) => path.resolve(root) === path.resolve(parent))) itemsToFix.push(t)
+    const targets = Array.isArray(req.body?.targets) ? req.body.targets : []
+    const warehouses = await getWarehouseDirs()
+    const warehouse = warehouses[0]
+    const warehouseReals = await Promise.all(warehouses.map((w) => fs.realpath(w).catch(() => path.resolve(w))))
+    const isWarehouseDir = async (d: string) => {
+      const r = await fs.realpath(d).catch(() => path.resolve(d))
+      return warehouseReals.some((w) => r === w || r.startsWith(w + path.sep))
     }
-    if (targets.length > 0 && itemsToFix.length === 0) {
-      return { ok: false, fixedCount: 0, results: [], error: '没有合法的修复目标' }
+
+    const agentDirs: { agentId: string; dir: string }[] = []
+    for (const agent of AGENTS) {
+      if (agent.id === 'universal') continue
+      for (const dir of agentGlobalPaths(agent, homedir)) {
+        if (!(await isWarehouseDir(dir))) agentDirs.push({ agentId: agent.id, dir })
+      }
     }
-    if (itemsToFix.length === 0) {
-      for (const agent of AGENTS) {
-        if (!agent.globalPaths || agent.globalPaths.length === 0) continue
-        if (agent.id === 'universal') continue
-        for (const globalPath of agentGlobalPaths(agent, homedir)) {
-          try {
-            const entries = await fs.readdir(globalPath, { withFileTypes: true })
-            for (const entry of entries) {
-              const entryPath = path.join(globalPath, entry.name)
-              const stat = await fs.lstat(entryPath)
-              if (stat.isDirectory() && !stat.isSymbolicLink() && !entry.name.startsWith('.')) {
-                itemsToFix.push({
-                  name: entry.name,
-                  path: entryPath,
-                  agentId: agent.id,
-                })
-              }
-            }
-          } catch {}
+
+    const items: { name: string; path: string; agentId: string }[] = []
+    if (targets.length > 0) {
+      for (const t of targets) {
+        if (!t || !isPlainSegment(t.name) || typeof t.path !== 'string' || path.basename(t.path) !== t.name) continue
+        const owner = agentDirs.find((d) => path.resolve(d.dir) === path.resolve(path.dirname(t.path)))
+        if (owner) items.push({ name: t.name, path: t.path, agentId: owner.agentId })
+      }
+      if (items.length === 0) return { ok: false, fixedCount: 0, results: [], error: '没有合法的修复目标' }
+    } else {
+      for (const { agentId, dir } of agentDirs) {
+        const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
+        for (const e of entries) {
+          if (e.isDirectory() && !e.name.startsWith('.')) items.push({ name: e.name, path: path.join(dir, e.name), agentId })
         }
       }
     }
 
-    for (const item of itemsToFix) {
-      let targetRealPath = path.join(realGlobalBase, item.name)
-
-      try {
-        await fs.access(targetRealPath)
-        targetRealPath = path.join(realGlobalBase, `${item.name}_fixed_${Date.now()}`)
-      } catch {}
-
-      try {
+    const results: { name: string; success: boolean; error?: string }[] = []
+    const adopted: { agentId: string; dest: string }[] = []
+    await withWriteLock(async () => {
+      for (const item of items) {
         try {
-          await fs.rename(item.path, targetRealPath)
-        } catch {
-          await copyDir(item.path, targetRealPath)
-          await fs.rm(item.path, { recursive: true })
+          const st = await fs.lstat(item.path)
+          if (!st.isDirectory() || st.isSymbolicLink()) throw new Error('不是真实目录')
+          adopted.push({ agentId: item.agentId, dest: await adoptIntoWarehouse(item.path, warehouse) })
+          results.push({ name: item.name, success: true })
+        } catch (err: any) {
+          results.push({ name: item.name, success: false, error: err.message })
         }
-
-        await fs.symlink(targetRealPath, item.path, 'dir')
-        fixedCount++
-        results.push({ name: item.name, success: true })
-      } catch (err: any) {
-        results.push({ name: item.name, success: false, error: err.message })
       }
+    })
+
+    // Keep adopted skills in agents that have a rule which would not include them.
+    if (adopted.length) {
+      const ins = await inspect()
+      const allNames = [...ins.sources.keys()]
+      const byReal = new Map([...ins.sources.values()].map((src) => [src.realPath, src.name]))
+      const wanted: { agentId: string; name: string }[] = []
+      for (const a of adopted) {
+        const name = byReal.get(await fs.realpath(a.dest).catch(() => a.dest))
+        if (name) wanted.push({ agentId: a.agentId, name })
+      }
+      await updateDistribution((s) => {
+        for (const { agentId, name } of wanted) {
+          if (s.agents[agentId] && !desiredNames(s.agents[agentId], s, allNames).has(name)) {
+            setSkillForAgent(s, agentId, name, true, allNames)
+          }
+        }
+      })
     }
 
     invalidateCache()
-    return { ok: true, fixedCount, results }
+    return { ok: true, fixedCount: adopted.length, results, warehouse }
   })
 
-  // POST /api/skills/batch/symlink - Batch add symlinks or batch clear all symlinks in an IDE
+  // POST /api/skills/batch/symlink — legacy batch actions mapped onto rules:
+  //   add        → include the chosen warehouse skills for that agent, apply them
+  //   remove_all → set the agent to 'off', apply (removes only managed links)
   app.post<{
     Body: {
       action: 'add' | 'remove_all'
@@ -1228,103 +829,44 @@ export async function manageRoutes(app: FastifyInstance) {
       skillIds?: string[]
     }
   }>('/api/skills/batch/symlink', async (req, reply) => {
-    const { action, agentId, skillIds = [] } = req.body
-
-    const agent = AGENTS.find((a) => a.id === agentId)
-    if (!agent || !agent.globalPaths || agent.globalPaths.length === 0) {
+    const { action, agentId, skillIds = [] } = req.body ?? ({} as any)
+    if (!distributableAgents().some((a) => a.id === agentId) || agentId === 'universal') {
       reply.status(400)
       return { ok: false, error: '无效或不支持的 Agent ID' }
     }
 
-    // User-scoped agents (e.g. TeleAgent) own one directory per account.
-    const globalPaths = agentGlobalPaths(agent, homedir)
-
     if (action === 'add') {
-      if (skillIds.length === 0) {
-        return { ok: true, message: '未勾选技能' }
+      if (!Array.isArray(skillIds) || skillIds.length === 0) return { ok: true, message: '未勾选技能', results: [] }
+      const ins = await inspect()
+      const allNames = [...ins.sources.keys()]
+      const results: { name: string; success: boolean; error?: string }[] = []
+      const names: string[] = []
+      for (const id of skillIds) {
+        const skill = await findKnownSkill({ id })
+        if (!skill) results.push({ name: String(id), success: false, error: '未找到该 Skill' })
+        else if (!ins.sources.has(skill.name)) results.push({ name: skill.name, success: false, error: '不在 Skill 仓库中，无法分发（请先收归到仓库）' })
+        else names.push(skill.name)
       }
-
-      const { fullScan } = await import('../scanner/discovery.js')
-      const scanRes = await fullScan()
-      const matchedSkills = scanRes.skills.filter((s) => skillIds.includes(s.id))
-
-      const results = []
-
-      for (const globalPath of globalPaths) {
-        await fs.mkdir(globalPath, { recursive: true })
-
-        for (const skill of matchedSkills) {
-          const targetLinkPath = path.join(globalPath, skill.name)
-          let resolvedRealPath: string
-          try {
-            resolvedRealPath = await fs.realpath(skill.realPath)
-          } catch {
-            resolvedRealPath = path.resolve(skill.realPath)
-          }
-
-          if (path.resolve(targetLinkPath) === resolvedRealPath) {
-            results.push({ name: skill.name, success: true, message: '本体无需创建软链' })
-            continue
-          }
-
-          let exists = false
-          let isSymlink = false
-          let currentTarget = ''
-
-          try {
-            const lstat = await fs.lstat(targetLinkPath)
-            exists = true
-            isSymlink = lstat.isSymbolicLink()
-            if (isSymlink) {
-              currentTarget = await fs.readlink(targetLinkPath)
-            }
-          } catch {
-            exists = false
-          }
-
-          if (exists) {
-            if (isSymlink) {
-              const resolvedTarget = path.resolve(globalPath, currentTarget)
-              if (resolvedTarget === resolvedRealPath) {
-                results.push({ name: skill.name, success: true, message: '软链已存在' })
-                continue
-              }
-              await fs.unlink(targetLinkPath)
-            } else {
-              results.push({ name: skill.name, success: false, error: '目标路径已存在真实文件夹，未覆盖。' })
-              continue
-            }
-          }
-
-          try {
-            await fs.symlink(resolvedRealPath, targetLinkPath, 'dir')
-            results.push({ name: skill.name, success: true })
-          } catch (err: any) {
-            results.push({ name: skill.name, success: false, error: err.message })
-          }
+      if (names.length) {
+        await updateDistribution((s) => {
+          for (const n of names) setSkillForAgent(s, agentId, n, true, allNames)
+        })
+        const applied = await applyScoped({ agentIds: [agentId], skills: names })
+        const failedIds = new Set(applied.results.filter((r) => !r.ok).map((r) => r.id))
+        for (const n of names) {
+          const failed = [...failedIds].find((id) => id.endsWith(path.sep + n))
+          results.push(failed ? { name: n, success: false, error: applied.results.find((r) => r.id === failed)?.error } : { name: n, success: true })
         }
       }
-
-      invalidateCache()
       return { ok: true, results }
-    } else if (action === 'remove_all') {
-      let removedCount = 0
-      for (const globalPath of globalPaths) {
-        try {
-          const entries = await fs.readdir(globalPath, { withFileTypes: true })
-          for (const entry of entries) {
-            const entryPath = path.join(globalPath, entry.name)
-            const stat = await fs.lstat(entryPath)
-            if (stat.isSymbolicLink()) {
-              await fs.unlink(entryPath)
-              removedCount++
-            }
-          }
-        } catch {}
-      }
+    }
 
-      invalidateCache()
-      return { ok: true, removedCount }
+    if (action === 'remove_all') {
+      await updateDistribution((s) => {
+        s.agents[agentId] = { mode: 'off' }
+      })
+      const applied = await applyScoped({ agentIds: [agentId] })
+      return { ok: applied.failed === 0, removedCount: applied.applied, applied }
     }
 
     reply.status(400)
@@ -1341,7 +883,6 @@ export async function manageRoutes(app: FastifyInstance) {
   // POST /api/settings
   app.post<{
     Body: {
-      enabledAgentIds?: string[]
       customGlobalSkillsDir?: string
       skillWarehouses?: string[]
       githubToken?: string
@@ -1349,7 +890,7 @@ export async function manageRoutes(app: FastifyInstance) {
       httpProxy?: string
     }
   }>('/api/settings', async (req, reply) => {
-    const { enabledAgentIds, customGlobalSkillsDir, skillWarehouses, githubToken, clearGithubToken, httpProxy } = req.body ?? ({} as any)
+    const { customGlobalSkillsDir, skillWarehouses, githubToken, clearGithubToken, httpProxy } = req.body ?? ({} as any)
     
     let normalizedPath: string | undefined = undefined
     if (customGlobalSkillsDir && customGlobalSkillsDir.trim() !== '') {
@@ -1370,7 +911,6 @@ export async function manageRoutes(app: FastifyInstance) {
 
     const oldSettings = await readIdeSettingsFull()
     const newSettings: AppSettings = {
-      enabledAgentIds: Array.isArray(enabledAgentIds) ? enabledAgentIds : oldSettings.enabledAgentIds,
       customGlobalSkillsDir: normalizedPath,
       skillWarehouses: normalizedWarehouses !== undefined ? normalizedWarehouses : oldSettings.skillWarehouses,
       // Empty / omitted token means "keep the stored one" (the UI never
@@ -1381,73 +921,26 @@ export async function manageRoutes(app: FastifyInstance) {
           ? githubToken.trim()
           : oldSettings.githubToken,
       httpProxy: httpProxy !== undefined ? httpProxy : oldSettings.httpProxy,
-      // Per-skill IDE overrides are not edited here — carry them over. They
-      // used to be dropped on every settings save.
+      // Legacy distribution fields: migrated into distribution.json, kept
+      // untouched here (they used to be dropped on every save).
+      enabledAgentIds: oldSettings.enabledAgentIds,
       skillOverrides: oldSettings.skillOverrides,
     }
 
-    if (newSettings.customGlobalSkillsDir && newSettings.customGlobalSkillsDir !== oldSettings.customGlobalSkillsDir) {
-      const targetDir = newSettings.customGlobalSkillsDir
-      await fs.mkdir(targetDir, { recursive: true })
-      
-      for (const agent of AGENTS) {
-        if (!agent.globalPaths || agent.globalPaths.length === 0 || agent.id === 'universal') continue
-        for (const globalPath of agentGlobalPaths(agent, homedir)) {
-          if (path.resolve(globalPath) === path.resolve(targetDir)) continue
-
-          try {
-            const entries = await fs.readdir(globalPath, { withFileTypes: true })
-            for (const entry of entries) {
-              const entryPath = path.join(globalPath, entry.name)
-              const stat = await fs.lstat(entryPath)
-
-              if (stat.isDirectory() && !stat.isSymbolicLink() && !entry.name.startsWith('.')) {
-                const newDest = path.join(targetDir, entry.name)
-                let destExists = false
-                try {
-                  await fs.access(newDest)
-                  destExists = true
-                } catch {}
-
-                let finalDest = newDest
-                if (destExists) {
-                  finalDest = path.join(targetDir, `${entry.name}_migrated_${Date.now()}`)
-                }
-
-                try {
-                  await fs.rename(entryPath, finalDest)
-                } catch {
-                  await copyDir(entryPath, finalDest)
-                  await fs.rm(entryPath, { recursive: true })
-                }
-              }
-            }
-          } catch {}
-        }
-      }
-    }
+    // Changing the warehouse path no longer moves every agent's real skill
+    // directories as a side effect. Adopting them is an explicit action
+    // ("一键收归"), and the new warehouse only takes effect on the next apply.
+    if (newSettings.customGlobalSkillsDir) await fs.mkdir(newSettings.customGlobalSkillsDir, { recursive: true })
 
     await writeIdeSettingsFull(newSettings)
-
-    // Agents the user just dropped from the enabled list get their symlinks
-    // cleaned up explicitly — the scan itself no longer deletes anything.
-    const removedAgentIds = oldSettings.enabledAgentIds.filter(
-      (id) => !newSettings.enabledAgentIds.includes(id),
-    )
-    for (const removedId of removedAgentIds) {
-      await pruneAgentSymlinks(removedId)
-    }
 
     // Dynamic apply proxy settings
     const { setupProxy } = await import('../sync/proxy.js')
     await setupProxy()
 
-    const { fullScan } = await import('../scanner/discovery.js')
-    const scanRes = await fullScan()
-    await ensureEnabledIdesSymlinks(scanRes.skills)
-
     invalidateCache()
-    return { ok: true, settings: newSettings }
+    const { githubToken: _token, ...publicSettings } = newSettings
+    return { ok: true, settings: { ...publicSettings, hasGithubToken: !!newSettings.githubToken } }
   })
 }
 

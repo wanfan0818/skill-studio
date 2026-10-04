@@ -491,7 +491,7 @@ function escapeRegExp(s: string): string {
  *
  * Contract:
  *   - A template WITHOUT a wildcard is returned verbatim, whether or not it
- *     exists on disk. Callers rely on this: `ensureEnabledIdesSymlinks`
+ *     exists on disk. Callers rely on this: the distribution reconciler
  *     bootstraps a brand-new IDE directory with `fs.mkdir(..., { recursive: true })`,
  *     so the path must survive resolution before the directory exists.
  *   - A template WITH a wildcard is matched against the filesystem at every

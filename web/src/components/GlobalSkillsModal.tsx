@@ -107,7 +107,7 @@ export function GlobalSkillsModal({ allSkills, onClose }: GlobalSkillsModalProps
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              勾选提升为全局 Skill 后，无需在各个项目内单独绑定，各大 IDE 即可在所有项目中跨领域全局直接激活调用！
+              全局集会分发到分发模式为「仅全局集」的 IDE（在「同步」页设置）；「全部仓库 Skill」模式的 IDE 本来就包含它们。保存后立即应用变更的 Skill。
             </p>
           </div>
           <button

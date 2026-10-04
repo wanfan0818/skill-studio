@@ -3,7 +3,8 @@ import os from 'os'
 import path from 'path'
 import fs from 'fs/promises'
 import { invalidateCache } from './skills.js'
-import { readIdeSettingsFull, copyDir } from './manage.js'
+import { copyDir } from './manage.js'
+import { readIdeSettingsFull } from '../settings.js'
 import { execFileSafe } from '../utils/exec.js'
 import { isPlainSegment, isSafeGithubName } from '../utils/safe.js'
 import { findOwningCloneDir } from './github.js'
@@ -132,12 +133,8 @@ export async function marketRoutes(app: FastifyInstance) {
         }
       }
 
-      // Re-scan and synchronize symlinks
-      const { fullScan } = await import('../scanner/discovery.js')
-      const { ensureEnabledIdesSymlinks } = await import('./manage.js')
-      const scanRes = await fullScan()
-      await ensureEnabledIdesSymlinks(scanRes.skills)
-
+      // New skills reach agents through the distribution plan (shown as
+      // pending in the UI), not by linking everything right here.
       invalidateCache()
       return { ok: true, log: stdout + '\n' + stderr }
     } catch (err: any) {

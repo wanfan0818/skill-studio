@@ -1,4 +1,4 @@
-import { readIdeSettingsFull } from '../routes/manage.js'
+import { readIdeSettingsFull } from '../settings.js'
 import type { SkillGithubSource } from '../types.js'
 
 export interface GithubRateLimit {

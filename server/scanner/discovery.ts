@@ -16,12 +16,7 @@ import { classifyAll } from './taxonomy.js'
 import { detectSimilarSkills } from './similarity.js'
 import { computeHealth } from './health.js'
 import type { Skill, Project, ConflictGroup, ScanResult, ScanPathReport } from '../types.js'
-import {
-  isSyncingSymlinks,
-  setSyncingSymlinks,
-  ensureEnabledIdesSymlinks,
-  readIdeSettingsFull,
-} from '../routes/manage.js'
+import { readIdeSettingsFull } from '../settings.js'
 import { analyzeSecurity } from './security.js'
 import { checkSkillDrift } from './drift.js'
 import { moveToTrash } from '../trash/store.js'
@@ -849,16 +844,12 @@ export async function fullScan(): Promise<ScanResult> {
 
   const dedupedSkills: Skill[] = Array.from(new Set(seenByRealPath.values()))
 
-  // Attach isGlobalActive status based on ~/.config/skill-studio/global-skills.json
+  // isGlobalActive: the skill is in the distribution state's global set.
   try {
-    const globalConfigFile = path.join(homedir, '.config', 'skill-studio', 'global-skills.json')
-    const rawGlobalConfig = await fs.readFile(globalConfigFile, 'utf-8').catch(() => '{}')
-    const parsedGlobal = JSON.parse(rawGlobalConfig)
-    const globalNames = new Set<string>(Array.isArray(parsedGlobal.globalSkills) ? parsedGlobal.globalSkills : [])
+    const raw = await fs.readFile(path.join(homedir, '.config', 'skill-studio', 'distribution.json'), 'utf-8')
+    const globalNames = new Set<string>(Array.isArray(JSON.parse(raw)?.globalSet) ? JSON.parse(raw).globalSet : [])
     for (const s of dedupedSkills) {
-      if (globalNames.has(s.name)) {
-        s.isGlobalActive = true
-      }
+      if (globalNames.has(s.name)) s.isGlobalActive = true
     }
   } catch {}
 
@@ -887,14 +878,9 @@ export async function fullScan(): Promise<ScanResult> {
     byAgent[s.agent] = (byAgent[s.agent] || 0) + 1
   }
 
-  // Auto-sync enabled IDEs symlinks to keep them in sync on scanning
-  if (!isSyncingSymlinks) {
-    try {
-      await ensureEnabledIdesSymlinks(classifiedSkills)
-    } catch (err) {
-      console.error('Failed to auto-sync enabled IDE symlinks during scan:', err)
-    }
-  }
+  // Scanning is read-only. It used to link every discovered skill into every
+  // enabled agent here; distribution is now an explicit plan → apply step
+  // (server/distribution/reconcile.ts).
 
   return {
     skills: classifiedSkills,

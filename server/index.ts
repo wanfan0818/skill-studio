@@ -5,7 +5,9 @@ import path from 'path'
 import { fileURLToPath } from 'url'
 import fs from 'fs'
 import { skillRoutes } from './routes/skills.js'
-import { manageRoutes, isSyncingSymlinks } from './routes/manage.js'
+import { manageRoutes } from './routes/manage.js'
+import { distributionRoutes } from './routes/distribution.js'
+import { isApplying } from './distribution/lock.js'
 import { versionRoutes } from './routes/versions.js'
 import { similarityRoutes } from './routes/similarity.js'
 import { trashRoutes } from './routes/trash.js'
@@ -92,6 +94,7 @@ await app.register(githubRoutes)
 await app.register(projectRoutes)
 await app.register(updaterRoutes)
 await app.register(globalRoutes)
+await app.register(distributionRoutes)
 
 // Health check
 app.get('/api/health', async () => ({ status: 'ok' }))
@@ -112,7 +115,7 @@ function broadcast(data: any) {
 let debounceTimer: ReturnType<typeof setTimeout> | null = null
 
 const watchCallback: WatchCallback = (event) => {
-  if (isSyncingSymlinks) return
+  if (isApplying()) return
   if (debounceTimer) clearTimeout(debounceTimer)
   debounceTimer = setTimeout(() => {
     // Only invalidate and notify. Drifted physical copies are NOT

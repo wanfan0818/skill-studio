@@ -4,7 +4,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import { parseSkillMd } from '../scanner/parser.js'
 import { invalidateCache } from './skills.js'
-import { readIdeSettingsFull } from './manage.js'
+import { readIdeSettingsFull } from '../settings.js'
 import { execFileSafe } from '../utils/exec.js'
 import { isInside, isPlainSegment } from '../utils/safe.js'
 

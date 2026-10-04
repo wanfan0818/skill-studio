@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useState } from 'react'
 import type { Skill } from '../hooks/useSkills'
 import { AGENT_ORDER, AGENT_META } from '../agents'
+import { DistributionPanel } from './DistributionPanel'
 
 interface SyncViewProps {
   allSkills: Skill[]
@@ -35,8 +36,8 @@ interface PublicSyncConfig {
   lastValidatedAt: string | null
 }
 
-export function SyncView({ allSkills }: SyncViewProps) {
-  const [tab, setTab] = useState<'github' | 'symlinks' | 'settings'>('github')
+export function SyncView({ allSkills, initialTab }: SyncViewProps & { initialTab?: 'github' | 'symlinks' | 'settings' }) {
+  const [tab, setTab] = useState<'github' | 'symlinks' | 'settings'>(initialTab ?? 'github')
   const [config, setConfig] = useState<PublicSyncConfig | null>(null)
   const [loading, setLoading] = useState(true)
 
@@ -133,43 +134,14 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
   const [anomalies, setAnomalies] = useState<Anomaly[]>([])
   const [agentStats, setAgentStats] = useState<AgentStat[]>([])
   const [loading, setLoading] = useState(true)
+  const [loaded, setLoaded] = useState(false)
   const [fixing, setFixing] = useState(false)
-  const [clearingId, setClearingId] = useState<string | null>(null)
-  const [togglingId, setTogglingId] = useState<string | null>(null)
-
-  const handleToggleIde = async (agentId: string, enabled: boolean) => {
-    if (togglingId) return
-
-    if (!enabled) {
-      if (!confirm(`确定要关闭该 IDE 的全局 Skill 共享吗？\n\n这会安全地清空该 IDE 下挂载的所有软链接。`)) {
-        return
-      }
-    }
-
-    setTogglingId(agentId)
-    try {
-      const res = await fetch('/api/ide/toggle', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ agentId, enabled }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        await fetchAnomaliesAndStats()
-      } else {
-        alert(data.error || '切换共享状态失败')
-      }
-    } catch (err: any) {
-      alert('请求失败: ' + err.message)
-    } finally {
-      setTogglingId(null)
-    }
-  }
 
   // 批量分发的 states
   const [selectedSkillIds, setSelectedSkillIds] = useState<Set<string>>(new Set())
   const [targetAgentId, setTargetAgentId] = useState<string>('')
   const [batchSyncing, setBatchSyncing] = useState(false)
+  const [distKey, setDistKey] = useState(0)
   const [searchQuery, setSearchQuery] = useState('')
 
   const fetchAnomaliesAndStats = useCallback(async () => {
@@ -183,6 +155,7 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
       }
     } catch {}
     setLoading(false)
+    setLoaded(true)
   }, [])
 
   useEffect(() => {
@@ -193,7 +166,7 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
     if (anomalies.length === 0 || fixing) return
     if (
       !confirm(
-        `确定要将这 ${anomalies.length} 个异常安装的 Skill 一键收归并修复吗？\n\n我们将把它们的物理实体目录移至全局共享路径下，并在原 IDE 专属目录生成软链接以确保原有服务依然正常运作。`
+        `确定要将这 ${anomalies.length} 个 Skill 收归到仓库吗？\n\n它们的真实目录会被移入 Skill 仓库，并在原 IDE 目录留下指向仓库的软链接，原 IDE 继续可用；之后它们就可以分发到其它 IDE。`
       )
     )
       return
@@ -218,39 +191,6 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
       alert('修复网络请求失败: ' + err.message)
     } finally {
       setFixing(false)
-    }
-  }
-
-  const handleClearSymlinks = async (agentId: string, agentName: string) => {
-    if (clearingId) return
-    if (
-      !confirm(
-        `确定要清空 ${agentName} 下的所有符号链接吗？\n\n这只会删除软链接以解绑 IDE 对这些 Skill 的使用权，不会损害真正的物理技能文件夹，保证绝对安全。`
-      )
-    )
-      return
-
-    setClearingId(agentId)
-    try {
-      const res = await fetch('/api/skills/batch/symlink', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          action: 'remove_all',
-          agentId,
-        }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        alert(`已成功清空 ${agentName} 下的 ${data.removedCount} 个软链接。`)
-        await fetchAnomaliesAndStats()
-      } else {
-        alert(data.error || '清空失败')
-      }
-    } catch (err: any) {
-      alert('请求错误: ' + err.message)
-    } finally {
-      setClearingId(null)
     }
   }
 
@@ -285,6 +225,7 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
           setSelectedSkillIds(new Set())
         }
         await fetchAnomaliesAndStats()
+        setDistKey((k) => k + 1)
       } else {
         alert(data.error || '同步失败')
       }
@@ -304,9 +245,11 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
     })
   }
 
+  // Only warehouse skills can be distributed to IDE global directories.
   const filteredSkills = allSkills.filter((skill) =>
-    skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-    skill.description.toLowerCase().includes(searchQuery.toLowerCase())
+    skill.isWarehouseSource &&
+    (skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
+      skill.description.toLowerCase().includes(searchQuery.toLowerCase()))
   )
 
   const handleSelectAll = () => {
@@ -317,7 +260,9 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
     }
   }
 
-  if (loading) {
+  // Full-page spinner only for the first load; refreshes keep children
+  // (and their messages) mounted.
+  if (loading && !loaded) {
     return (
       <div className="flex items-center justify-center h-64">
         <div className="w-10 h-10 border-2 border-slate-600 border-t-white rounded-full animate-spin" />
@@ -367,13 +312,16 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
         </div>
       )}
 
-      <div className="grid grid-cols-1 lg:grid-cols-12 gap-6 items-start">
-        {/* 2. 批量同步挂载区 */}
-        <div className="lg:col-span-7 bg-slate-900/40 border border-slate-800/80 rounded-xl p-5 space-y-4">
+      {/* 2. 分发规则与计划 */}
+      <DistributionPanel key={distKey} onApplied={fetchAnomaliesAndStats} />
+
+      <div className="grid grid-cols-1 gap-6 items-start">
+        {/* 3. 批量同步挂载区 */}
+        <div className="bg-slate-900/40 border border-slate-800/80 rounded-xl p-5 space-y-4">
           <div>
             <h3 className="text-sm font-semibold text-slate-300 mb-1">批量分发 Skills 软链接</h3>
             <p className="text-xs text-slate-500">
-              勾选下方 Skills，选择目标 IDE，一键创建软链接将其挂载在相应 IDE 技能目录下。
+              勾选仓库中的 Skill 并选择目标 IDE：会加入该 IDE 的分发规则并立即为这些 Skill 创建链接。
             </p>
           </div>
 
@@ -448,59 +396,6 @@ function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
           </div>
         </div>
 
-        {/* 3. 各 IDE 共享开关与统计 */}
-        <div className="lg:col-span-5 bg-slate-900/40 border border-slate-800/80 rounded-xl p-5 space-y-4">
-          <div>
-            <h3 className="text-sm font-semibold text-slate-300 mb-1">IDE 全局共享管理</h3>
-            <p className="text-xs text-slate-500">
-              一键启用 IDE 的全局共享后，所有已扫描的 Skill 都会自动链接并在该 IDE 中可用。
-            </p>
-          </div>
-
-          <div className="space-y-2.5 max-h-96 overflow-y-auto">
-            {agentStats.map((agent) => (
-              <div key={agent.agentId} className="bg-slate-950/40 border border-slate-800/50 rounded-xl p-3.5 flex items-center justify-between gap-3">
-                <div className="min-w-0 flex-1">
-                  <div className="flex items-center gap-2 mb-0.5">
-                    <span className="text-base shrink-0">{agent.icon}</span>
-                    <span className="font-semibold text-slate-200 text-xs truncate">{agent.agentName}</span>
-                  </div>
-                  <div className="text-[10px] text-slate-500 truncate max-w-[200px]" title={agent.globalPath}>
-                    {agent.globalPath}
-                  </div>
-                  <div className="flex items-center gap-3 mt-2 font-medium">
-                    <div className="text-[10px] text-slate-400">
-                      软链: <span className="text-indigo-400 text-xs font-bold tabular-nums">{agent.symlinkCount}</span>
-                    </div>
-                    <div className="text-[10px] text-slate-400">
-                      物理: <span className={`text-xs font-bold tabular-nums ${agent.realCount > 0 ? 'text-red-400' : 'text-slate-500'}`}>{agent.realCount}</span>
-                    </div>
-                  </div>
-                </div>
-                
-                {/* Toggle Switch */}
-                <div className="flex flex-col items-end gap-1.5 shrink-0">
-                  <button
-                    onClick={() => handleToggleIde(agent.agentId, !agent.enabled)}
-                    disabled={togglingId !== null}
-                    className={`relative inline-flex h-5 w-9 shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 ease-in-out focus:outline-none ${
-                      agent.enabled ? 'bg-indigo-600' : 'bg-slate-800'
-                    } ${togglingId !== null ? 'opacity-50 cursor-not-allowed' : ''}`}
-                  >
-                    <span
-                      className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow ring-0 transition duration-200 ease-in-out ${
-                        agent.enabled ? 'translate-x-4' : 'translate-x-0'
-                      }`}
-                    />
-                  </button>
-                  <span className="text-[9px] text-slate-500 font-semibold uppercase tracking-wider">
-                    {togglingId === agent.agentId ? '同步中...' : agent.enabled ? '全局共享' : '未共享'}
-                  </span>
-                </div>
-              </div>
-            ))}
-          </div>
-        </div>
       </div>
     </div>
   )

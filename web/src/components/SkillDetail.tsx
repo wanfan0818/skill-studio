@@ -36,7 +36,8 @@ export function SkillDetail({
   const [message, setMessage] = useState<{ type: 'success' | 'error'; text: string } | null>(null)
 
   const [associationData, setAssociationData] = useState<{
-    ides: Array<{ id: string; name: string; enabled: boolean; linked: boolean }>
+    distributable?: boolean
+    ides: Array<{ id: string; name: string; enabled: boolean; linked: boolean; managed?: boolean; mode?: string | null }>
     projects: Array<{ name: string; path: string; enabled: boolean; linked: boolean }>
   } | null>(null)
   const [associationLoading, setAssociationLoading] = useState(false)
@@ -85,10 +86,9 @@ export function SkillDetail({
     if (!associationData) return
     setSaveAssociationLoading(true)
     
-    const disabledIdes = associationData.ides
-      .filter(ide => !ide.enabled)
-      .map(ide => ide.id)
-      
+ // Explicit per-IDE intent; the server only applies what changed.
+    const ides = Object.fromEntries(associationData.ides.map((ide) => [ide.id, ide.enabled]))
+
     const enabledProjectPaths = associationData.projects
       .filter(proj => proj.enabled)
       .map(proj => proj.path)
@@ -97,11 +97,13 @@ export function SkillDetail({
       const res = await fetch(`/api/skills/${skill.name}/association`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ disabledIdes, enabledProjectPaths }),
+        body: JSON.stringify({ ides, enabledProjectPaths }),
       })
       const data = await res.json()
       if (data.ok) {
-        showMsg('success', '分发与关联关系保存并同步成功！')
+        const n = data.distribution?.applied ?? 0
+        const failed = data.distribution?.failed ?? 0
+        showMsg(failed ? 'error' : 'success', failed ? `已保存，但有 ${failed} 项链接操作失败` : `已保存${n ? `，应用 ${n} 项链接变更` : ''}`)
         if (onChanged) await onChanged()
         await fetchAssociation()
       } else {
@@ -624,12 +626,20 @@ export function SkillDetail({
                 <span className="text-[11px] font-semibold text-slate-400 block border-b border-slate-800/40 pb-1">
                   分发到全局 IDE
                 </span>
+                {associationData.distributable === false && (
+                  <p className="text-[10px] text-amber-400/90">
+                    这个 Skill 不在 Skill 仓库中（项目私有或某个 IDE 自带），不能分发到其它 IDE 的全局目录。可在「同步」页把它收归到仓库。
+                  </p>
+                )}
                 <div className="grid grid-cols-2 gap-2">
-                  {associationData.ides.map((ide) => (
-                    <label key={ide.id} className="flex items-center gap-2 text-xs text-slate-300 hover:text-slate-100 cursor-pointer select-none">
+                  {associationData.ides
+                    .filter((ide) => ide.managed || ide.linked || ide.enabled)
+                    .map((ide) => (
+                    <label key={ide.id} className="flex items-center gap-2 text-xs text-slate-300 hover:text-slate-100 cursor-pointer select-none" title={ide.managed ? `分发模式：${ide.mode}` : '该 IDE 未托管；勾选会为它创建只包含此 Skill 的规则'}>
                       <input
                         type="checkbox"
                         checked={ide.enabled}
+                        disabled={associationData.distributable === false}
                         onChange={() => handleToggleIde(ide.id)}
                         className="rounded border-slate-800 text-indigo-600 bg-slate-950 focus:ring-indigo-500 focus:ring-offset-slate-900"
                       />
@@ -642,6 +652,10 @@ export function SkillDetail({
                     </label>
                   ))}
                 </div>
+                {associationData.distributable !== false &&
+                  !associationData.ides.some((ide) => ide.managed || ide.linked || ide.enabled) && (
+                    <p className="text-[10px] text-slate-500">还没有托管任何 IDE。请先在「同步」页的「IDE 分发规则」里为 IDE 选择分发模式。</p>
+                  )}
               </div>
 
               {/* Projects */}
@@ -693,7 +707,7 @@ export function SkillDetail({
                   disabled={saveAssociationLoading}
                   className="px-3 py-1.5 text-xs font-semibold text-white bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 rounded transition-all"
                 >
-                  {saveAssociationLoading ? '保存并同步中...' : '保存修改并自动同步'}
+                  {saveAssociationLoading ? '保存并应用中...' : '保存并应用此 Skill 的变更'}
                 </button>
               </div>
             </div>
