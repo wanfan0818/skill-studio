@@ -57,7 +57,10 @@ export async function execFileSafe(
       })
     } catch (spawnError: any) {
       void collect()
-      return reject(new Error(`Failed to spawn ${file}: ${spawnError.message}`))
+      // On macOS, posix_spawn rejects descriptors >= OPEN_MAX (10240) with
+      // EBADF — i.e. this process has too many files open.
+      const hint = spawnError?.code === 'EBADF' ? '（进程打开的文件过多，请重启 Skill Studio）' : ''
+      return reject(new Error(`Failed to spawn ${file}: ${spawnError.message}${hint}`))
     }
 
     let timedOut = false
