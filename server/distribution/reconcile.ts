@@ -489,6 +489,12 @@ export async function executeActions(actions: PlanAction[], opts: { includeLegac
           await fs.rename(a.linkPath, old)
           await fs.rename(tmp, a.linkPath)
           await fs.rm(old, { recursive: true, force: true })
+        } else if (a.isCopy && a.type === 'legacy' && a.target) {
+          // Replace an old, fingerprint-less copy: old one to the recycle bin.
+          if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error('已不是受管副本，未改动')
+          const tmp = await materializeCopy(a.target, a.linkPath)
+          await moveToTrash(a.linkPath, a.name)
+          await fs.rename(tmp, a.linkPath)
         } else if (a.isCopy && (a.type === 'unlink' || a.type === 'legacy') && !a.target) {
           if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error('已不是受管副本，未改动')
           // An untouched copy is just a duplicate of its source; an edited

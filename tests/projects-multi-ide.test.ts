@@ -18,6 +18,9 @@ writeProfile(proj, ['alpha', 'beta'], 'codex')
 fs.mkdirSync(path.join(proj, '.codex', 'skills'), { recursive: true })
 fs.symlinkSync(path.join(warehouse, 'alpha'), path.join(proj, '.codex', 'skills', 'alpha'))
 const ownSkill = writeSkill(path.join(proj, '.claude', 'skills'), 'own', '# project-local\n')
+// …and one in a dir no selected IDE will read (ZCode's own dir)
+fs.mkdirSync(path.join(proj, '.zcode', 'skills'), { recursive: true })
+fs.symlinkSync(path.join(warehouse, 'beta'), path.join(proj, '.zcode', 'skills', 'beta'))
 
 // An old auto-generated profile → candidate, not configured
 const auto = path.join(docs, 'auto')
@@ -75,15 +78,21 @@ describe('project-centric, multi-IDE model', () => {
     for (const skill of ['alpha', 'beta']) for (const ide of ['codex', 'opencode', 'workbuddy-ai']) expect(after.matrix[skill][ide]).toBe('ok')
   })
 
-  it('leftover dirs are reported and only cleaned with includeLegacy', async () => {
-    const p = await plan()
-    const stray = p.strayDirs.find((d: any) => d.rel === '.codex/skills')
-    expect(stray).toMatchObject({ managed: 1 })
-    await post('/api/projects/apply', { projectPath: proj })
-    expect(lst(path.join(proj, '.codex', 'skills', 'alpha')).isSymbolicLink()).toBe(true)
-    await post('/api/projects/apply', { projectPath: proj, includeLegacy: true })
+  it('an old dir a selected IDE still reads is migrated by default (no duplicates)', async () => {
+    // .codex/skills is read by Codex (selected) → its managed link moves to .agents/skills
     expect(fs.existsSync(path.join(proj, '.codex', 'skills', 'alpha'))).toBe(false)
-    expect(fs.existsSync(path.join(ownSkill, 'SKILL.md'))).toBe(true) // real dirs in stray dirs stay
+    expect(lst(path.join(proj, '.agents', 'skills', 'alpha')).isSymbolicLink()).toBe(true)
+  })
+
+  it('a dir no selected IDE reads is only cleaned with includeLegacy', async () => {
+    const p = await plan()
+    expect(p.strayDirs.find((d: any) => d.rel === '.zcode/skills')).toMatchObject({ managed: 1 })
+    expect(p.actions.find((a: any) => a.linkPath.includes('.zcode'))).toMatchObject({ type: 'legacy' })
+    await post('/api/projects/apply', { projectPath: proj })
+    expect(lst(path.join(proj, '.zcode', 'skills', 'beta')).isSymbolicLink()).toBe(true)
+    await post('/api/projects/apply', { projectPath: proj, includeLegacy: true })
+    expect(fs.existsSync(path.join(proj, '.zcode', 'skills', 'beta'))).toBe(false)
+    expect(fs.existsSync(path.join(ownSkill, 'SKILL.md'))).toBe(true) // real dirs stay
   })
 
   it("a project's own skill is distributed with a relative link and shown as local where it lives", async () => {
@@ -109,6 +118,25 @@ describe('project-centric, multi-IDE model', () => {
     expect(lst(dir).isSymbolicLink()).toBe(false)
     expect(JSON.parse(fs.readFileSync(path.join(dir, '.skill-source'), 'utf-8')).originPath).toBe(fs.realpathSync(path.join(warehouse, 'alpha')))
     expect((await plan()).matrix.alpha).toEqual({ codex: 'ok', antigravity: 'ok' })
+  })
+
+  it('an old copy without a fingerprint is replaced only on opt-in, old copy to the trash', async () => {
+    const dir = path.join(proj, '.agents', 'skills', 'alpha')
+    const marker = JSON.parse(fs.readFileSync(path.join(dir, '.skill-source'), 'utf-8'))
+    delete marker.fingerprint // as written by older versions
+    fs.writeFileSync(path.join(dir, '.skill-source'), JSON.stringify(marker))
+    fs.writeFileSync(path.join(dir, 'SKILL.md'), '---\nname: alpha\ndescription: d\n---\n# old copy\n')
+    let p = await plan()
+    expect(p.matrix.alpha.antigravity).toBe('conflict')
+    expect(p.actions.find((a: any) => a.name === 'alpha' && a.linkPath === dir)).toMatchObject({ type: 'legacy', isCopy: true })
+    await post('/api/projects/apply', { projectPath: proj })
+    expect(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf-8')).toContain('# old copy')
+    await post('/api/projects/apply', { projectPath: proj, includeLegacy: true })
+    expect(fs.readFileSync(path.join(dir, 'SKILL.md'), 'utf-8')).toContain('# alpha')
+    const trashRoot = path.join(home, '.skill-studio', 'trash')
+    expect(fs.readdirSync(trashRoot).some((id) => JSON.parse(fs.readFileSync(path.join(trashRoot, id, '.trash-meta.json'), 'utf-8')).skillName === 'alpha')).toBe(true)
+    p = await plan()
+    expect(p.matrix.alpha.antigravity).toBe('ok')
   })
 
   it('importing a candidate configures it with the suggested IDEs', async () => {

@@ -190,7 +190,13 @@ export async function planProject(projectPath: string, opts: { profile?: Project
         }
         const [copyHash, srcHash] = await Promise.all([getSkillFolderHash(linkPath), getSkillFolderHash(want.realPath)])
         if (copyHash === srcHash) setStatus(t.realDir, entry.name, 'ok')
-        else if (!marker.fingerprint || copyHash !== marker.fingerprint) {
+        else if (!marker.fingerprint) {
+          // Written by an older version without a fingerprint: we can't tell an
+          // in-place edit from an outdated copy. Offer replacement on opt-in;
+          // the old copy goes to the recycle bin.
+          push({ type: 'legacy', name: entry.name, linkPath, target: want.realPath, current: linkPath, isCopy: true, reason: '旧版副本（无指纹）与来源不一致；勾选清理后用当前来源替换，原副本进回收站' })
+          setStatus(t.realDir, entry.name, 'conflict')
+        } else if (copyHash !== marker.fingerprint) {
           push({ type: 'conflict', name: entry.name, linkPath, current: linkPath, reason: '副本已在 IDE 中被修改，未覆盖', isCopy: true })
           setStatus(t.realDir, entry.name, 'conflict')
         } else {
@@ -246,8 +252,13 @@ export async function planProject(projectPath: string, opts: { profile?: Project
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => null)
     if (!entries) continue
     const readBy = AGENTS.filter((a) => a.projectPaths.includes(rel)).map((a) => a.id)
-    const why = readBy.some((id) => ides.includes(id))
-      ? `已改为写入共享目录（${rel} 不再由 Skill Studio 管理）`
+    // A selected IDE still reads this dir: leaving our entries here would show
+    // it every skill twice, so moving them to the write dir is part of the
+    // default plan. Dirs no selected IDE reads are only cleaned on opt-in.
+    const readBySelected = readBy.some((id) => ides.includes(id))
+    const leftoverType: ActionType = readBySelected ? 'unlink' : 'legacy'
+    const why = readBySelected
+      ? `迁移到 ${[...targets.values()].map((t) => t.rel).join(' / ')}（${rel} 也会被读取，留着会重复）`
       : readBy.length
         ? `${readBy.map((id) => agentById(id)?.name ?? id).join(' / ')} 未在项目中启用`
         : '旧版本写入的目录，IDE 不会读取'
@@ -261,12 +272,12 @@ export async function planProject(projectPath: string, opts: { profile?: Project
         const real = await realOr(p)
         if (isManagedLink(real, path.resolve(dir, await fs.readlink(p).catch(() => ''))) || !real) {
           managed++
-          actions.push({ ...base, id: `legacy:${p}`, type: 'legacy', current: real ?? undefined, agentIds: readBy, dir, mode: 'symlink', projectPath })
+          actions.push({ ...base, id: `${leftoverType}:${p}`, type: leftoverType, current: real ?? undefined, agentIds: readBy, dir, mode: 'symlink', projectPath })
         }
       } else if (e.isDirectory()) {
         if ((await readMarker(p))?.originPath) {
           managed++
-          actions.push({ ...base, id: `legacy:${p}`, type: 'legacy', isCopy: true, agentIds: readBy, dir, mode: 'copy', projectPath })
+          actions.push({ ...base, id: `${leftoverType}:${p}`, type: leftoverType, isCopy: true, agentIds: readBy, dir, mode: 'copy', projectPath })
         } else realCount++
       }
     }
