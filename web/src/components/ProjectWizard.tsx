@@ -1,5 +1,4 @@
 import { useState, useEffect } from 'react'
-import { AGENT_ORDER, AGENT_META } from '../agents'
 import type { Skill } from '../hooks/useSkills'
 
 interface SkillProfile {
@@ -41,7 +40,15 @@ export function ProjectWizard({ project, allSkills, onClose }: ProjectWizardProp
   const [projectPath, setProjectPath] = useState('')
   const [projectName, setProjectName] = useState('')
   const [projectDesc, setProjectDesc] = useState('')
-  const [targetIde, setTargetIde] = useState('claude-code')
+  const [ides, setIdes] = useState<string[]>(['claude-code'])
+  // Only IDEs with project-level skill support can be targets.
+  const [ideOptions, setIdeOptions] = useState<{ id: string; name: string; icon: string }[]>([])
+  useEffect(() => {
+    fetch('/api/projects/ides')
+      .then((r) => r.json())
+      .then((d) => d.ok && setIdeOptions(d.ides))
+      .catch(() => {})
+  }, [])
   const [formError, setFormError] = useState<string | null>(null)
 
   // 第二步状态
@@ -57,7 +64,7 @@ export function ProjectWizard({ project, allSkills, onClose }: ProjectWizardProp
       setProjectPath(project.path)
       setProjectName(project.profile?.name || project.name)
       setProjectDesc(project.profile?.description || '')
-      setTargetIde(project.profile?.targetIde || 'claude-code')
+      setIdes(project.profile?.targetIde ? [project.profile.targetIde] : ['claude-code'])
       setSelectedSkills(new Set(project.profile?.skills || []))
     }
   }, [project])
@@ -154,7 +161,7 @@ export function ProjectWizard({ project, allSkills, onClose }: ProjectWizardProp
         name: projectName,
         description: projectDesc,
         skills: Array.from(selectedSkills),
-        targetIde
+        ides,
       }
 
       const saveRes = await fetch('/api/projects/profile', {
@@ -192,7 +199,6 @@ export function ProjectWizard({ project, allSkills, onClose }: ProjectWizardProp
   }
 
   // 获取有效的 IDE 选项列表（排除 universal/unknown 等）
-  const ideOptions = AGENT_ORDER.filter(id => id !== 'universal' && id !== 'unknown')
 
   // 对所有 Skill 过滤出“其他技能”（排除 AI 推荐之外的）
   const recNames = new Set(aiRecs.map(r => r.name))
@@ -292,31 +298,25 @@ export function ProjectWizard({ project, allSkills, onClose }: ProjectWizardProp
                 />
               </div>
 
-              {/* 目标 IDE */}
+              {/* 目标 IDE（可多选） */}
               <div className="flex flex-col gap-1.5">
-                <label className="text-xs font-semibold text-slate-300">主要开发 IDE（目标编译端）</label>
-                <select
-                  value={targetIde}
-                  onChange={(e) => setTargetIde(e.target.value)}
-                  className="px-3 py-2 text-sm bg-slate-950 border border-slate-800 rounded-lg text-slate-100 focus:outline-none focus:border-blue-500/50 transition appearance-none cursor-pointer"
-                  style={{
-                    backgroundImage: `url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='none'%3E%3Cpath d='M7 9l3 3 3-3' stroke='%2394a3b8' stroke-width='1.5' stroke-linecap='round' stroke-linejoin='round'/%3E%3C/svg%3E")`,
-                    backgroundPosition: 'right 0.75rem center',
-                    backgroundSize: '1.25rem',
-                    backgroundRepeat: 'no-repeat',
-                    paddingRight: '2.5rem'
-                  }}
-                >
-                  {ideOptions.map(id => {
-                    const meta = AGENT_META[id]
+                <label className="text-xs font-semibold text-slate-300">在这个项目里使用的 IDE（可多选）</label>
+                <div className="flex flex-wrap gap-1.5">
+                  {ideOptions.map((ide) => {
+                    const on = ides.includes(ide.id)
                     return (
-                      <option key={id} value={id}>
-                        {meta ? `${meta.icon} ${meta.name}` : id}
-                      </option>
+                      <button
+                        key={ide.id}
+                        type="button"
+                        onClick={() => setIdes(on ? ides.filter((x) => x !== ide.id) : [...ides, ide.id])}
+                        className={`px-2.5 py-1 rounded-full text-xs border cursor-pointer ${on ? 'border-indigo-400/60 bg-indigo-500/15 text-slate-100' : 'border-slate-800 text-slate-500 hover:text-slate-300'}`}
+                      >
+                        {ide.icon} {ide.name}
+                      </button>
                     )
                   })}
-                </select>
-                <span className="text-[10px] text-slate-500">指定该项目关联的 IDE，Skill Studio 会将软链接软植入到此 IDE 的项目配置夹中</span>
+                </div>
+                <span className="text-[10px] text-slate-500">同一套 Skill 会同步到每个选中的 IDE；共用 .agents/skills 的 IDE 只写一份</span>
               </div>
 
               {/* 项目描述（用于 AI 匹配） */}

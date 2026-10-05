@@ -43,10 +43,17 @@ function badRequest(reply: any, error: string) {
   return { ok: false, error }
 }
 
-/** Accept `ides` (v2) or the legacy single `targetIde`. */
+/**
+ * Accept `ides` (v2) or the legacy single `targetIde`. A legacy client
+ * sending only `targetIde` must not shrink a multi-IDE project to one IDE,
+ * so it is merged into the existing list (`fallback`) instead.
+ */
 function idesFrom(body: any, fallback: string[] = []): string[] {
   if (Array.isArray(body?.ides)) return validProjectIdes(body.ides)
-  if (typeof body?.targetIde === 'string') return validProjectIdes([body.targetIde])
+  if (typeof body?.targetIde === 'string') {
+    const ide = validProjectIdes([body.targetIde])
+    return fallback.length ? Array.from(new Set([...ide, ...fallback])) : ide
+  }
   return fallback
 }
 
