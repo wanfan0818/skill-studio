@@ -318,7 +318,11 @@ function App() {
         {/* 第二栏：核心内容工作区 (中栏) */}
         <div className="flex-1 flex flex-col min-w-0 h-full bg-slate-950/20">
           {view === 'projects' ? (
-            <ProjectsView allSkills={allSkills} onRefreshSkills={scan} />
+            // Same scroll container as the other views: the column above is
+            // h-full + overflow-hidden, so without it long project lists were cut off.
+            <div className="flex-1 overflow-y-auto px-6 py-5 min-w-0">
+              <ProjectsView allSkills={allSkills} onRefreshSkills={scan} />
+            </div>
           ) : (
             <>
               {/* Top Bar for header title & actions */}
