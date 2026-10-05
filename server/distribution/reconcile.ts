@@ -58,6 +58,10 @@ export interface PlanAction {
   mode: 'symlink' | 'copy'
   /** The entry at linkPath is a managed physical copy (copy mode). */
   isCopy?: boolean
+  /** Symlink text to write when it differs from `target` (relative links). */
+  linkText?: string
+  /** Set for project actions: the project root. */
+  projectPath?: string
 }
 
 export interface TargetSummary {
@@ -102,7 +106,7 @@ interface CopyMarker {
   [k: string]: unknown
 }
 
-async function readMarker(dir: string): Promise<CopyMarker | null> {
+export async function readMarker(dir: string): Promise<CopyMarker | null> {
   try {
     return JSON.parse(await fs.readFile(path.join(dir, '.skill-source'), 'utf-8'))
   } catch {
@@ -120,7 +124,7 @@ export interface Inspection {
   plan: Plan
 }
 
-async function realOr(p: string, fallback: string | null = null): Promise<string | null> {
+export async function realOr(p: string, fallback: string | null = null): Promise<string | null> {
   try {
     return await fs.realpath(p)
   } catch {
@@ -222,13 +226,13 @@ async function projectSkillDirReals(): Promise<Set<string>> {
   return out
 }
 
-function fingerprintOf(actions: PlanAction[]): string {
+export function fingerprintOf(actions: PlanAction[]): string {
   const h = crypto.createHash('sha1')
   for (const a of [...actions].sort((x, y) => x.id.localeCompare(y.id))) h.update(`${a.id}|${a.target ?? ''}\n`)
   return h.digest('hex').slice(0, 16)
 }
 
-function emptyCounts(): Record<ActionType, number> {
+export function emptyCounts(): Record<ActionType, number> {
   return { link: 0, relink: 0, copy: 0, update: 0, unlink: 0, legacy: 0, conflict: 0 }
 }
 
@@ -416,7 +420,7 @@ export interface ApplyResult {
  * marker; the caller renames it into place, so the agent never sees a
  * half-written skill.
  */
-async function materializeCopy(source: string, linkPath: string): Promise<string> {
+export async function materializeCopy(source: string, linkPath: string): Promise<string> {
   const tmp = path.join(path.dirname(linkPath), `.${path.basename(linkPath)}.ss-tmp-${crypto.randomBytes(4).toString('hex')}`)
   try {
     await copyDir(source, tmp, { skip: (n) => n === '.git' })
@@ -437,7 +441,7 @@ async function materializeCopy(source: string, linkPath: string): Promise<string
 }
 
 /** True when a managed copy still matches what we wrote (not edited in place). */
-async function copyUnmodified(dir: string): Promise<boolean> {
+export async function copyUnmodified(dir: string): Promise<boolean> {
   const marker = await readMarker(dir)
   return !!marker?.fingerprint && (await getSkillFolderHash(dir)) === marker.fingerprint
 }
@@ -453,21 +457,29 @@ async function lstatOrNull(p: string) {
 export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
   const current = await plan({ skills: opts.skills, agentIds: opts.agentIds })
   if (opts.fingerprint && opts.fingerprint !== current.fingerprint) throw new PlanChangedError()
+  return executeActions(current.actions, { includeLegacy: opts.includeLegacy })
+}
 
+/**
+ * Execute planned actions. Shared by global distribution and project sync.
+ * Every action re-checks the disk right before touching it; conflicts are
+ * never executed, legacy actions only with includeLegacy.
+ */
+export async function executeActions(actions: PlanAction[], opts: { includeLegacy?: boolean } = {}): Promise<ApplyResult> {
   const result: ApplyResult = { applied: 0, failed: 0, skipped: 0, results: [] }
   await withWriteLock(async () => {
-    for (const a of current.actions) {
+    for (const a of actions) {
       if (a.type === 'conflict' || (a.type === 'legacy' && !opts.includeLegacy)) {
         result.skipped++
         continue
       }
       try {
-        // Re-check what is on disk right before touching it.
         const st = await lstatOrNull(a.linkPath)
+        const linkText = a.linkText ?? a.target!
         if (a.type === 'link') {
           if (st) throw new Error('目标位置已被占用')
           await fs.mkdir(a.dir, { recursive: true })
-          await fs.symlink(a.target!, a.linkPath, 'dir')
+          await fs.symlink(linkText, a.linkPath, 'dir')
         } else if (a.type === 'update') {
           if (!st?.isDirectory() || st.isSymbolicLink() || !(await copyUnmodified(a.linkPath))) {
             throw new Error('副本已被修改或已不是受管副本，未覆盖')
@@ -477,9 +489,9 @@ export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
           await fs.rename(a.linkPath, old)
           await fs.rename(tmp, a.linkPath)
           await fs.rm(old, { recursive: true, force: true })
-        } else if (a.isCopy && a.type === 'unlink') {
+        } else if (a.isCopy && (a.type === 'unlink' || a.type === 'legacy') && !a.target) {
           if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error('已不是受管副本，未改动')
-          // An untouched copy is just a duplicate of the warehouse; an edited
+          // An untouched copy is just a duplicate of its source; an edited
           // one goes to the recycle bin.
           if (await copyUnmodified(a.linkPath)) await fs.rm(a.linkPath, { recursive: true, force: true })
           else await moveToTrash(a.linkPath, a.name)
@@ -492,7 +504,7 @@ export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
         } else {
           if (!st?.isSymbolicLink()) throw new Error('目标已不是符号链接，未改动')
           await fs.unlink(a.linkPath)
-          if (a.target) await fs.symlink(a.target, a.linkPath, 'dir') // relink, or legacy replacement
+          if (a.target) await fs.symlink(linkText, a.linkPath, 'dir') // relink, or legacy replacement
         }
         result.applied++
         result.results.push({ id: a.id, ok: true })

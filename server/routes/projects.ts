@@ -3,53 +3,29 @@ import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
 import {
-  discoverProjects,
   fullScan,
   saveProjectToRegistry,
   addExcludedProject,
   getExcludedProjects,
   removeExcludedProject,
-  purgeProjectSkillsAndProfile
+  purgeProjectSkillsAndProfile,
 } from '../scanner/discovery.js'
-import { AGENTS, allAgentProjectRelPaths } from '../scanner/agents.js'
+import { projectCapableAgents } from '../scanner/agents.js'
 import { recommendSkills } from '../recommender/engine.js'
 import { invalidateCache } from './skills.js'
-import { syncProjectSkills } from '../projects/sync.js'
-import type { SkillProfile, ProjectWithProfile } from '../types.js'
-import { isPlainSegment, writeFileAtomic } from '../utils/safe.js'
+import { isPlainSegment } from '../utils/safe.js'
+import { PlanChangedError } from '../distribution/reconcile.js'
+import {
+  readProfile,
+  writeProfile,
+  listConfiguredProjects,
+  listCandidateProjects,
+  suggestIdes,
+  validProjectIdes,
+} from '../projects/model.js'
+import { planProject, applyProject, buildProjectContext } from '../projects/reconcile.js'
 
 const homedir = os.homedir()
-
-/**
- * 辅助函数：读取项目根目录下的 .skills-profile.json
- */
-async function readProjectProfile(projectPath: string): Promise<SkillProfile | undefined> {
-  const profilePath = path.join(projectPath, '.skills-profile.json')
-  try {
-    const raw = await fs.readFile(profilePath, 'utf-8')
-    const parsed = JSON.parse(raw)
-    if (parsed && Array.isArray(parsed.skills)) {
-      return {
-        version: parsed.version || 1,
-        name: parsed.name || path.basename(projectPath),
-        description: parsed.description || '',
-        skills: parsed.skills,
-        targetIde: parsed.targetIde || 'claude-code',
-        createdAt: parsed.createdAt || new Date().toISOString(),
-        updatedAt: parsed.updatedAt || new Date().toISOString()
-      }
-    }
-  } catch {}
-  return undefined
-}
-
-/**
- * 辅助函数：将 profile 写入项目根目录下的 .skills-profile.json
- */
-async function writeProjectProfile(projectPath: string, profile: SkillProfile): Promise<void> {
-  const profilePath = path.join(projectPath, '.skills-profile.json')
-  await writeFileAtomic(profilePath, JSON.stringify(profile, null, 2))
-}
 
 /** Project paths from the client must be absolute paths to existing directories. */
 async function isValidProjectDir(p: unknown): Promise<boolean> {
@@ -62,397 +38,220 @@ async function isValidProjectDir(p: unknown): Promise<boolean> {
   }
 }
 
+function badRequest(reply: any, error: string) {
+  reply.status(400)
+  return { ok: false, error }
+}
 
-/**
- * 辅助函数：查找某项目实际链接的 Skill 数量与状态
- */
-async function getProjectSkillsStatus(
-  projectPath: string,
-  profile?: SkillProfile
-): Promise<{ linkedCount: number; status: 'synced' | 'drift' | 'no-profile'; actualSkills: string[] }> {
-  const actualLinkedSkills = new Set<string>()
-  const uniqueRelPaths = allAgentProjectRelPaths()
-
-  for (const rel of uniqueRelPaths) {
-    const targetDir = path.join(projectPath, rel)
-    try {
-      const entries = await fs.readdir(targetDir, { withFileTypes: true })
-      for (const entry of entries) {
-        if (entry.name.startsWith('.')) continue
-        if (entry.isSymbolicLink() || entry.isDirectory()) {
-          actualLinkedSkills.add(entry.name)
-        }
-      }
-    } catch {}
-  }
-
-  const linkedCount = actualLinkedSkills.size
-  const actualSkills = Array.from(actualLinkedSkills)
-
-  if (!profile) {
-    return { linkedCount, status: 'no-profile', actualSkills }
-  }
-
-  const declaredSkills = new Set(profile.skills)
-  let isSynced = true
-
-  for (const s of declaredSkills) {
-    if (!actualLinkedSkills.has(s)) {
-      isSynced = false
-      break
-    }
-  }
-
-  return {
-    linkedCount,
-    status: isSynced ? 'synced' : 'drift',
-    actualSkills,
-  }
+/** Accept `ides` (v2) or the legacy single `targetIde`. */
+function idesFrom(body: any, fallback: string[] = []): string[] {
+  if (Array.isArray(body?.ides)) return validProjectIdes(body.ides)
+  if (typeof body?.targetIde === 'string') return validProjectIdes([body.targetIde])
+  return fallback
 }
 
 export async function projectRoutes(app: FastifyInstance) {
-  // 1. GET /api/projects - 获取所有项目及配置信息
+  // IDEs that can be project targets (for the IDE picker).
+  app.get('/api/projects/ides', async () => {
+    return {
+      ok: true,
+      ides: projectCapableAgents().map((a) => ({
+        id: a.id,
+        name: a.name,
+        icon: a.icon,
+        writeDirs: a.projectWritePaths ?? [a.projectPaths[0]],
+        mode: a.projectLinkMode ?? 'symlink',
+      })),
+    }
+  })
+
+  // Configured projects with a per-project summary (status matrix included).
   app.get('/api/projects', async () => {
-    const found = await discoverProjects()
-    const projectsWithProfile: ProjectWithProfile[] = []
-
-    for (const p of found) {
-      // Read-only: a GET must never write into the user's projects. This used
-      // to auto-create a profile with targetIde 'antigravity', which armed the
-      // physical-copy sync mode on projects the user never configured.
-      const profile = await readProjectProfile(p.path)
-      const { linkedCount, status } = await getProjectSkillsStatus(p.path, profile)
-
-      projectsWithProfile.push({
-        name: profile?.name || p.name,
+    const ctx = await buildProjectContext()
+    const projects = []
+    for (const p of await listConfiguredProjects()) {
+      const plan = await planProject(p.path, { profile: p.profile, ctx })
+      const pending = plan.counts.link + plan.counts.relink + plan.counts.copy + plan.counts.update + plan.counts.unlink
+      projects.push({
+        name: p.name,
         path: p.path,
-        skillCount: linkedCount,
-        profile,
-        linkedSkillCount: linkedCount,
-        profileSkillCount: profile ? profile.skills.length : 0,
-        syncStatus: profile ? status : 'no-profile',
+        profile: p.profile,
+        ides: plan.ides,
+        matrix: plan.matrix,
+        counts: plan.counts,
+        pending,
+        strayDirs: plan.strayDirs,
+        warnings: plan.warnings,
+        fingerprint: plan.fingerprint,
+        // legacy fields some views still read
+        skillCount: p.profile.skills.length,
+        profileSkillCount: p.profile.skills.length,
+        syncStatus: pending || plan.counts.conflict ? 'drift' : 'synced',
       })
     }
-
-    return { ok: true, projects: projectsWithProfile }
+    return { ok: true, projects }
   })
 
-  // 2. GET /api/projects/profile - 获取单个项目的 profile
-  app.get<{
-    Querystring: { projectPath: string }
-  }>('/api/projects/profile', async (req, reply) => {
+  // Folders that look like projects but are not configured yet.
+  app.get('/api/projects/candidates', async () => {
+    return { ok: true, candidates: await listCandidateProjects() }
+  })
+
+  // Turn a candidate into a configured project (skills found + inferred IDEs).
+  app.post<{ Body: { projectPath: string; ides?: string[] } }>('/api/projects/import', async (req, reply) => {
+    const { projectPath } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    const candidate = (await listCandidateProjects()).find((c) => path.resolve(c.path) === path.resolve(projectPath))
+    const existing = await readProfile(projectPath)
+    const ides = idesFrom(req.body, candidate?.suggestedIdes ?? suggestIdes([], existing?.ides ?? []))
+    const profile = await writeProfile(projectPath, {
+      name: existing?.name ?? path.basename(projectPath),
+      description: existing?.description && existing.description !== '自动配置的项目 Profile' ? existing.description : '',
+      skills: candidate?.skills ?? existing?.skills ?? [],
+      ides,
+    })
+    await saveProjectToRegistry(projectPath, profile.name)
+    invalidateCache()
+    return { ok: true, profile, plan: await planProject(projectPath, { profile }) }
+  })
+
+  app.get<{ Querystring: { projectPath: string } }>('/api/projects/profile', async (req, reply) => {
     const { projectPath } = req.query
-    if (!projectPath) {
-      reply.status(400)
-      return { ok: false, error: '未提供项目路径 projectPath' }
-    }
-
-    const profile = await readProjectProfile(projectPath)
-    if (!profile) {
-      return { ok: true, exists: false }
-    }
-
-    return { ok: true, exists: true, profile }
+    if (!projectPath) return badRequest(reply, '未提供项目路径 projectPath')
+    const profile = await readProfile(projectPath)
+    return profile ? { ok: true, exists: true, profile } : { ok: true, exists: false }
   })
 
-  // 3. POST /api/projects/profile - 新增或修改项目的 profile
+  // Create or update a project's profile (does not touch disk beyond the profile).
   app.post<{
-    Body: {
-      projectPath: string
-      profile: Omit<SkillProfile, 'createdAt' | 'updatedAt'>
-    }
+    Body: { projectPath: string; profile: { name?: string; description?: string; skills?: string[]; ides?: string[]; targetIde?: string } }
   }>('/api/projects/profile', async (req, reply) => {
-    const { projectPath, profile } = req.body
-    if (!projectPath || !profile) {
-      reply.status(400)
-      return { ok: false, error: '缺少必填参数 projectPath 或 profile' }
-    }
-    if (!(await isValidProjectDir(projectPath))) {
-      reply.status(400)
-      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
-    }
+    const { projectPath, profile } = req.body ?? ({} as any)
+    if (!projectPath || !profile) return badRequest(reply, '缺少必填参数 projectPath 或 profile')
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    const existing = await readProfile(projectPath)
+    const saved = await writeProfile(projectPath, {
+      name: profile.name || existing?.name || path.basename(projectPath),
+      description: profile.description ?? existing?.description ?? '',
+      skills: Array.isArray(profile.skills) ? profile.skills : existing?.skills ?? [],
+      ides: idesFrom(profile, existing?.ides ?? ['claude-code']),
+    })
+    await saveProjectToRegistry(projectPath, saved.name)
+    invalidateCache()
+    return { ok: true, profile: saved }
+  })
 
-    const existing = await readProjectProfile(projectPath)
-    const now = new Date().toISOString()
-    const fullProfile: SkillProfile = {
-      version: profile.version || 1,
-      name: profile.name,
-      description: profile.description || '',
-      skills: profile.skills || [],
-      targetIde: profile.targetIde || 'claude-code',
-      createdAt: existing?.createdAt || now,
-      updatedAt: now
-    }
+  // Preview. Nothing on disk changes.
+  app.get<{ Querystring: { projectPath: string } }>('/api/projects/plan', async (req, reply) => {
+    const { projectPath } = req.query
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    return { ok: true, plan: await planProject(projectPath) }
+  })
 
+  // Apply a project's plan; with `fingerprint`, refuses if it changed.
+  app.post<{ Body: { projectPath: string; fingerprint?: string; includeLegacy?: boolean } }>('/api/projects/apply', async (req, reply) => {
+    const { projectPath, fingerprint, includeLegacy } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
     try {
-      await writeProjectProfile(projectPath, fullProfile)
-      await saveProjectToRegistry(projectPath, fullProfile.name)
-      return { ok: true, profile: fullProfile }
+      const r = await applyProject(projectPath, { fingerprint, includeLegacy: includeLegacy === true })
+      invalidateCache()
+      return { ok: r.failed === 0, ...r }
     } catch (err: any) {
-      reply.status(500)
-      return { ok: false, error: `写入配置文件失败: ${err.message}` }
+      if (err instanceof PlanChangedError) {
+        reply.status(409)
+        return { ok: false, error: err.message, code: 'PLAN_CHANGED' }
+      }
+      throw err
     }
   })
 
-  // 4. POST /api/projects/recommend-skills - 根据描述推荐 Skill
-  app.post<{
-    Body: { description: string }
-  }>('/api/projects/recommend-skills', async (req, reply) => {
-    const { description } = req.body
+  app.post<{ Body: { description: string } }>('/api/projects/recommend-skills', async (req, reply) => {
     try {
       const scanRes = await fullScan()
-      const recommended = recommendSkills(description, scanRes.skills)
-      return { ok: true, recommended }
+      return { ok: true, recommended: recommendSkills(req.body?.description ?? '', scanRes.skills) }
     } catch (err: any) {
       reply.status(500)
       return { ok: false, error: `推荐失败: ${err.message}` }
     }
   })
 
-  // 5. POST /api/projects/sync - 同步 Skill 软链接到项目目录
-  app.post<{
-    Body: { projectPath: string }
-  }>('/api/projects/sync', async (req, reply) => {
-    const { projectPath } = req.body
-    if (!projectPath) {
-      reply.status(400)
-      return { ok: false, error: '未提供项目路径 projectPath' }
-    }
-    if (!(await isValidProjectDir(projectPath))) {
-      reply.status(400)
-      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
-    }
-
-    let profile = await readProjectProfile(projectPath)
-    if (!profile) {
-      const status = await getProjectSkillsStatus(projectPath)
-      profile = {
-        version: 1,
-        name: path.basename(projectPath),
-        description: '自动配置的项目 Profile',
-        skills: status.actualSkills,
-        targetIde: 'claude-code',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-      await writeProjectProfile(projectPath, profile)
-    }
-
-    try {
-      const scanRes = await fullScan()
-      const globalSkillsMap = new Map(scanRes.skills.map(s => [s.name, s]))
-      const { conflicts } = await syncProjectSkills(projectPath, globalSkillsMap)
-      invalidateCache()
-      return {
-        ok: true,
-        message: conflicts.length
-          ? `已同步，但有 ${conflicts.length} 个同名真实目录未被覆盖`
-          : '项目 Skill 同步成功',
-        conflicts,
-      }
-    } catch (err: any) {
-      reply.status(500)
-      return { ok: false, error: `同步失败: ${err.message}` }
-    }
-  })
-
-  // 6. DELETE /api/projects/clean - 一键清理项目下的所有 Skill 软链接，并删除 profile
-  app.delete<{
-    Body: { projectPath: string }
-  }>('/api/projects/clean', async (req, reply) => {
-    const { projectPath } = req.body
-    if (!projectPath) {
-      reply.status(400)
-      return { ok: false, error: '未提供项目路径 projectPath' }
-    }
-    if (!(await isValidProjectDir(projectPath))) {
-      reply.status(400)
-      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
-    }
-
-    const profile = await readProjectProfile(projectPath)
-    if (!profile) {
-      // 就算没有 profile，我们也尽力清理各大 IDE 下的软链接
-      const cleanedDirs = []
-      for (const agent of AGENTS) {
-        for (const rel of agent.projectPaths) {
-          const targetDir = path.join(projectPath, rel)
-          try {
-            const entries = await fs.readdir(targetDir, { withFileTypes: true })
-            for (const entry of entries) {
-              const entryPath = path.join(targetDir, entry.name)
-              const stat = await fs.lstat(entryPath)
-              if (stat.isSymbolicLink()) {
-                await fs.unlink(entryPath)
-              }
-            }
-            cleanedDirs.push(rel)
-          } catch {}
-        }
-      }
-      return { ok: true, message: '未找到配置文件，已尽力清理 IDE 项目软链接。', cleanedDirs }
-    }
-
-    const agent = AGENTS.find(a => a.id === profile.targetIde)
-    const relPaths = agent && agent.projectPaths.length > 0 ? agent.projectPaths : ['.agents/skills']
-    const targetDir = path.join(projectPath, relPaths[0])
-
-    try {
-      // 删除软链接
-      const entries = await fs.readdir(targetDir, { withFileTypes: true }).catch(() => [] as any)
-      for (const entry of entries) {
-        const entryPath = path.join(targetDir, entry.name)
-        try {
-          const stat = await fs.lstat(entryPath)
-          if (stat.isSymbolicLink()) {
-            await fs.unlink(entryPath)
-          }
-        } catch {}
-      }
-
-      // 删除 profile 文件
-      const profilePath = path.join(projectPath, '.skills-profile.json')
-      await fs.unlink(profilePath).catch(() => {})
-
-      invalidateCache()
-      return { ok: true }
-    } catch (err: any) {
-      reply.status(500)
-      return { ok: false, error: `清理失败: ${err.message}` }
-    }
-  })
-
-  // 以项目为中心的单一 Skill 安装绑定接口
-  app.post<{
-    Body: { projectPath: string; skillName: string; targetIde?: string }
-  }>('/api/projects/install-skill', async (req, reply) => {
-    const { projectPath, skillName, targetIde } = req.body
-    if (!projectPath || !skillName) {
-      reply.status(400)
-      return { ok: false, error: '未提供 projectPath 或 skillName' }
-    }
-    if (!isPlainSegment(skillName)) {
-      reply.status(400)
-      return { ok: false, error: 'skillName 不合法' }
-    }
-    if (!(await isValidProjectDir(projectPath))) {
-      reply.status(400)
-      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
-    }
-
-    let profile = await readProjectProfile(projectPath)
-    if (!profile) {
-      const status = await getProjectSkillsStatus(projectPath)
-      profile = {
-        version: 1,
-        name: path.basename(projectPath),
-        description: '自动配置的项目 Profile',
-        skills: status.actualSkills,
-        targetIde: targetIde || 'claude-code',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-    }
-
-    if (targetIde) {
-      profile.targetIde = targetIde
-    }
-
-    if (!profile.skills.includes(skillName)) {
-      profile.skills.push(skillName)
-    }
-
-    await writeProjectProfile(projectPath, profile)
-    const scanRes = await fullScan()
-    const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
-    const { conflicts } = await syncProjectSkills(projectPath, globalSkillsMap)
+  // Legacy: "sync" = apply everything except opt-in cleanup.
+  app.post<{ Body: { projectPath: string } }>('/api/projects/sync', async (req, reply) => {
+    const { projectPath } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    if (!(await readProfile(projectPath))) return badRequest(reply, '该目录还不是已配置的项目')
+    const r = await applyProject(projectPath)
     invalidateCache()
-
-    return { ok: true, profile, conflicts }
+    const conflicts = r.plan.actions.filter((a) => a.type === 'conflict').map((a) => a.linkPath)
+    return {
+      ok: r.failed === 0,
+      message: r.failed ? `同步完成，但有 ${r.failed} 项失败` : conflicts.length ? `已同步，但有 ${conflicts.length} 个冲突未处理` : '项目 Skill 同步成功',
+      conflicts,
+      ...r,
+    }
   })
 
-  // 以项目为中心的单一 Skill 卸载解绑接口
-  app.post<{
-    Body: { projectPath: string; skillName: string }
-  }>('/api/projects/uninstall-skill', async (req, reply) => {
-    const { projectPath, skillName } = req.body
-    if (!projectPath || !skillName) {
-      reply.status(400)
-      return { ok: false, error: '未提供 projectPath 或 skillName' }
+  // Remove everything Skill Studio manages in the project, then the profile.
+  app.delete<{ Body: { projectPath: string } }>('/api/projects/clean', async (req, reply) => {
+    const { projectPath } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    const profile = await readProfile(projectPath)
+    if (profile) {
+      await applyProject(projectPath, { profile: { ...profile, skills: [], ides: [] }, includeLegacy: true })
+      await fs.unlink(path.join(projectPath, '.skills-profile.json')).catch(() => {})
     }
-    if (!isPlainSegment(skillName)) {
-      reply.status(400)
-      return { ok: false, error: 'skillName 不合法' }
-    }
-    if (!(await isValidProjectDir(projectPath))) {
-      reply.status(400)
-      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
-    }
-
-    let profile = await readProjectProfile(projectPath)
-    if (!profile) {
-      const status = await getProjectSkillsStatus(projectPath)
-      profile = {
-        version: 1,
-        name: path.basename(projectPath),
-        description: '',
-        skills: status.actualSkills,
-        targetIde: 'claude-code',
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      }
-    }
-
-    profile.skills = profile.skills.filter((s) => s !== skillName)
-    await writeProjectProfile(projectPath, profile)
-
-    const scanRes = await fullScan()
-    const globalSkillsMap = new Map(scanRes.skills.map((s) => [s.name, s]))
-    const { conflicts } = await syncProjectSkills(projectPath, globalSkillsMap)
     invalidateCache()
-
-    return { ok: true, profile, conflicts }
+    return { ok: true }
   })
 
-  // 删除 / 隐藏项目接口
-  app.post<{
-    Body: { projectPath: string; purgeFiles?: boolean }
-  }>('/api/projects/delete', async (req, reply) => {
-    const { projectPath, purgeFiles } = req.body
-    if (!projectPath) {
-      reply.status(400)
-      return { ok: false, error: '未提供 projectPath' }
-    }
-    if (!(await isValidProjectDir(projectPath))) {
-      reply.status(400)
-      return { ok: false, error: '项目路径必须是已存在目录的绝对路径' }
-    }
+  // Add one skill to a project (optionally adding an IDE), then apply it.
+  app.post<{ Body: { projectPath: string; skillName: string; targetIde?: string; ides?: string[] } }>('/api/projects/install-skill', async (req, reply) => {
+    const { projectPath, skillName } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    if (!isPlainSegment(skillName)) return badRequest(reply, 'skillName 不合法')
+    const existing = await readProfile(projectPath)
+    const extra = idesFrom(req.body)
+    const profile = await writeProfile(projectPath, {
+      name: existing?.name ?? path.basename(projectPath),
+      description: existing?.description ?? '',
+      skills: [...(existing?.skills ?? []), skillName],
+      ides: [...new Set([...(existing?.ides ?? []), ...extra])].length ? [...new Set([...(existing?.ides ?? []), ...extra])] : ['claude-code'],
+    })
+    await saveProjectToRegistry(projectPath, profile.name)
+    const r = await applyProject(projectPath, { skills: [skillName] })
+    invalidateCache()
+    return { ok: r.failed === 0, profile, conflicts: r.plan.actions.filter((a) => a.type === 'conflict' && a.name === skillName).map((a) => a.linkPath) }
+  })
 
-    if (purgeFiles) {
-      await purgeProjectSkillsAndProfile(projectPath)
-    }
+  app.post<{ Body: { projectPath: string; skillName: string } }>('/api/projects/uninstall-skill', async (req, reply) => {
+    const { projectPath, skillName } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    if (!isPlainSegment(skillName)) return badRequest(reply, 'skillName 不合法')
+    const existing = await readProfile(projectPath)
+    if (!existing) return badRequest(reply, '该目录还不是已配置的项目')
+    const profile = await writeProfile(projectPath, { ...existing, skills: existing.skills.filter((s) => s !== skillName) })
+    const r = await applyProject(projectPath, { skills: [skillName] })
+    invalidateCache()
+    return { ok: r.failed === 0, profile }
+  })
 
+  // Hide a project (and optionally remove its skill dirs, real ones to the trash).
+  app.post<{ Body: { projectPath: string; purgeFiles?: boolean } }>('/api/projects/delete', async (req, reply) => {
+    const { projectPath, purgeFiles } = req.body ?? ({} as any)
+    if (!(await isValidProjectDir(projectPath))) return badRequest(reply, '项目路径必须是已存在目录的绝对路径')
+    if (purgeFiles) await purgeProjectSkillsAndProfile(projectPath)
     await addExcludedProject(projectPath)
     invalidateCache()
     return { ok: true }
   })
 
-  // 获取已隐藏/排除的项目列表
   app.get('/api/projects/excluded', async () => {
-    const list = await getExcludedProjects()
-    return { ok: true, excludedProjects: list }
+    return { ok: true, excludedProjects: await getExcludedProjects() }
   })
 
-  // 恢复显示被隐藏的项目
-  app.post<{
-    Body: { projectPath: string }
-  }>('/api/projects/restore', async (req, reply) => {
-    const { projectPath } = req.body
-    if (!projectPath) {
-      reply.status(400)
-      return { ok: false, error: '未提供 projectPath' }
-    }
-
+  app.post<{ Body: { projectPath: string } }>('/api/projects/restore', async (req, reply) => {
+    const { projectPath } = req.body ?? ({} as any)
+    if (!projectPath) return badRequest(reply, '未提供 projectPath')
     await removeExcludedProject(projectPath)
     invalidateCache()
     return { ok: true }

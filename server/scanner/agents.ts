@@ -65,6 +65,17 @@ export interface AgentDef {
    * Skill Studio keeps in sync with the warehouse).
    */
   linkMode?: 'symlink' | 'copy'
+  /**
+   * Project dirs Skill Studio WRITES to for this agent (default: the first
+   * entry of projectPaths). `projectPaths` stays the full list the agent
+   * READS. Agents sharing a write dir (.agents/skills) share one copy.
+   */
+  projectWritePaths?: string[]
+  /** Like linkMode, for project dirs. */
+  projectLinkMode?: 'symlink' | 'copy'
+  /** Project dirs older Skill Studio versions wrote to that the agent never
+   *  reads; only offered for (opt-in) cleanup. */
+  projectLegacyPaths?: string[]
 }
 
 /**
@@ -127,7 +138,10 @@ export const AGENTS: AgentDef[] = [
     name: 'Codex',
     icon: '💻',
     globalPaths: ['.codex/skills'],
-    projectPaths: ['.codex/skills'],
+    // Verified (codex 0.153 `debug prompt-input`): reads both .codex/skills and
+    // .agents/skills in a repo and follows symlinks. Write to the shared dir.
+    projectPaths: ['.codex/skills', '.agents/skills'],
+    projectWritePaths: ['.agents/skills'],
   },
   {
     id: 'gemini-cli',
@@ -178,7 +192,14 @@ export const AGENTS: AgentDef[] = [
     name: 'Antigravity',
     icon: '🌌',
     globalPaths: ['.gemini/antigravity/skills'],
-    projectPaths: ['.agents/skills', '.antigravity/skills', '.gemini/antigravity/skills'],
+    // Verified (Antigravity 2.x language server): workspace skills live in
+    // .agents/skills (alt spelling _agents/skills). .antigravity/skills and
+    // .gemini/antigravity/skills — written by older versions — are never read.
+    // Symlink support unverified, so projects get real copies.
+    projectPaths: ['.agents/skills', '_agents/skills'],
+    projectWritePaths: ['.agents/skills'],
+    projectLinkMode: 'copy',
+    projectLegacyPaths: ['.antigravity/skills', '.gemini/antigravity/skills'],
   },
   {
     id: 'augment',
@@ -213,7 +234,7 @@ export const AGENTS: AgentDef[] = [
     name: 'WorkBuddy',
     icon: '💼',
     globalPaths: ['.workbuddy/skills'],
-    projectPaths: ['.workbuddy/skills', '.agents/skills'],
+    projectPaths: ['.workbuddy/skills'],
   },
   {
     // WorkBuddy AI is a separate product from WorkBuddy: it keeps its own
@@ -230,9 +251,11 @@ export const AGENTS: AgentDef[] = [
     //     dataFolderName is `.workbuddy-ai` — that is the primary path;
     //   - a second copy (workbuddy-core) hardcodes `<workspace>/.workbuddy/skills`.
     // We deploy to both so the skills are discoverable no matter which copy
-    // answers. `.agents/skills` is kept for the shared universal convention.
-    // Verified against WorkBuddy AI 5.6.2 on 2026-09-30.
-    projectPaths: ['.workbuddy-ai/skills', '.workbuddy/skills', '.agents/skills'],
+    // answers. It does NOT scan .agents/skills — its own source says those
+    // skills are "既不在设置页列出、agent-cli 运行时也不扫描".
+    // Verified against WorkBuddy AI 5.6.2 (2026-09-30, 2026-10-05).
+    projectPaths: ['.workbuddy-ai/skills', '.workbuddy/skills'],
+    projectWritePaths: ['.workbuddy-ai/skills', '.workbuddy/skills'],
   },
   {
     id: 'commandcode',
@@ -358,7 +381,10 @@ export const AGENTS: AgentDef[] = [
     name: 'OpenCode',
     icon: '📖',
     globalPaths: ['.config/opencode/skills'],
-    projectPaths: [],
+    // Verified (opencode 1.18): scans .claude/skills and .agents/skills walking
+    // up from cwd (glob with symlink: true), plus .opencode/{skill,skills}.
+    projectPaths: ['.opencode/skills', '.agents/skills', '.claude/skills'],
+    projectWritePaths: ['.agents/skills'],
   },
   {
     id: 'openclaw',
@@ -456,7 +482,10 @@ export const AGENTS: AgentDef[] = [
     name: 'ZCode',
     icon: '⚡',
     globalPaths: ['.zcode/skills', '.zcode/cli/skills'],
+    // Verified (ZCode 3.10): getWorkspaceZcodeSkillRoot / getWorkspaceAgentsSkillRoot;
+    // its walker follows symlinked directories.
     projectPaths: ['.zcode/skills', '.agents/skills'],
+    projectWritePaths: ['.agents/skills'],
   },
   {
     id: 'zencoder',
@@ -484,10 +513,22 @@ export function isValidAgentId(s: string): s is AgentId {
   return VALID_AGENT_IDS.has(s)
 }
 
+/** Every project-relative skills dir any agent reads, plus legacy dirs older
+ *  versions wrote (needed to detect and clean up existing projects). */
 export function allAgentProjectRelPaths(): string[] {
   const set = new Set<string>()
-  for (const a of AGENTS) for (const p of a.projectPaths) set.add(p)
+  for (const a of AGENTS) for (const p of [...a.projectPaths, ...(a.projectLegacyPaths ?? [])]) set.add(p)
   return Array.from(set)
+}
+
+/** Project dirs Skill Studio writes to for `agent` (empty: no project support). */
+export function projectWriteDirs(agent: AgentDef): string[] {
+  return agent.projectWritePaths ?? (agent.projectPaths.length ? [agent.projectPaths[0]] : [])
+}
+
+/** Agents that can be a project target. */
+export function projectCapableAgents(): AgentDef[] {
+  return AGENTS.filter((a) => a.id !== 'universal' && a.id !== 'unknown' && projectWriteDirs(a).length > 0)
 }
 
 function escapeRegExp(s: string): string {

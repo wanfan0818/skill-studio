@@ -1,10 +1,9 @@
 import type { FastifyInstance } from 'fastify'
-import fs from 'fs/promises'
 import path from 'path'
 import { invalidateCache } from './skills.js'
 import { isPlainSegment } from '../utils/safe.js'
-import { discoverProjects, fullScan } from '../scanner/discovery.js'
-import { syncProjectSkills } from '../projects/sync.js'
+import { listConfiguredProjects, writeProfile } from '../projects/model.js'
+import { applyProject } from '../projects/reconcile.js'
 import { applyScoped, setSkillAgents, skillDistributionStatus } from './distribution.js'
 
 /** One skill's associations: which IDEs it is distributed to, which projects use it. */
@@ -20,15 +19,11 @@ export async function associationRoutes(app: FastifyInstance) {
     }
     const { distributable, ides } = await skillDistributionStatus(name)
 
-    const projectsList = []
-    for (const proj of await discoverProjects()) {
-      let hasSkill = false
-      try {
-        const profile = JSON.parse(await fs.readFile(path.join(proj.path, '.skills-profile.json'), 'utf-8'))
-        hasSkill = Array.isArray(profile?.skills) && profile.skills.includes(name)
-      } catch {}
-      projectsList.push({ name: proj.name, path: proj.path, enabled: hasSkill, linked: hasSkill })
-    }
+    // Configured projects only; a project "has" the skill when it is in its list.
+    const projectsList = (await listConfiguredProjects()).map((p) => {
+      const has = p.profile.skills.includes(name)
+      return { name: p.name, path: p.path, enabled: has, linked: has, ides: p.profile.ides }
+    })
 
     return { name, distributable, ides, projects: projectsList }
   })
@@ -75,60 +70,20 @@ export async function associationRoutes(app: FastifyInstance) {
       }
     }
 
-    // 2. Fetch skillsMap. We ONLY scan once.
-    const scanRes = await fullScan()
-    const skillsMap = new Map(scanRes.skills.map(s => [s.name, s]))
-    const targetSkill = skillsMap.get(name)
-
-    // 3. Update project config profiles without running discoverProjects recursively.
-    // We derive originally linked projects directly from the scan output
-    const originallyLinkedProjectPaths = targetSkill?.linkedProjects?.map(p => p.path) || []
-    const allAffectedPaths = new Set([...enabledProjectPaths, ...originallyLinkedProjectPaths])
-
-    for (const projectPath of allAffectedPaths) {
-      const profilePath = path.join(projectPath, '.skills-profile.json')
-      const shouldHaveSkill = enabledProjectPaths.includes(projectPath)
-
-      let profile: any
-      try {
-        const raw = await fs.readFile(profilePath, 'utf-8')
-        profile = JSON.parse(raw)
-      } catch {}
-
-      if (profile && Array.isArray(profile.skills)) {
-        const hasSkill = profile.skills.includes(name)
-        let changed = false
-
-        if (shouldHaveSkill && !hasSkill) {
-          profile.skills.push(name)
-          changed = true
-        } else if (!shouldHaveSkill && hasSkill) {
-          profile.skills = profile.skills.filter((s: string) => s !== name)
-          changed = true
-        }
-
-        if (changed) {
-          profile.updatedAt = new Date().toISOString()
-          await fs.writeFile(profilePath, JSON.stringify(profile, null, 2), 'utf-8')
-          await syncProjectSkills(projectPath, skillsMap)
-        }
-      } else if (shouldHaveSkill) {
-        // Automatically initialize profile if user opts to associate this project
-        profile = {
-          version: 1,
-          name: path.basename(projectPath),
-          description: '',
-          skills: [name],
-          targetIde: 'claude-code',
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString()
-        }
-        await fs.writeFile(profilePath, JSON.stringify(profile, null, 2), 'utf-8')
-        await syncProjectSkills(projectPath, skillsMap)
-      }
+    // 2. Projects: add/remove the skill from each configured project's list,
+    //    then apply just that skill there (all of the project's IDEs).
+    const projectResults: { path: string; ok: boolean; error?: string }[] = []
+    for (const p of await listConfiguredProjects()) {
+      const should = enabledProjectPaths.includes(p.path)
+      const has = p.profile.skills.includes(name)
+      if (should === has) continue
+      const skills = should ? [...p.profile.skills, name] : p.profile.skills.filter((s) => s !== name)
+      const profile = await writeProfile(p.path, { ...p.profile, skills })
+      const r = await applyProject(p.path, { profile, skills: [name] })
+      projectResults.push({ path: p.path, ok: r.failed === 0, error: r.results.find((x) => !x.ok)?.error })
     }
 
     invalidateCache()
-    return { ok: true, distribution }
+    return { ok: projectResults.every((r) => r.ok), distribution, projects: projectResults }
   })
 }

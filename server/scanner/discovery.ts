@@ -797,23 +797,30 @@ async function runFullScan(): Promise<ScanResult> {
   )
   mark('plugins')
 
-  // 3. Project skills — for each project, scan every agent's project paths
-  const discoveredProjects = await discoverProjects()
+  // 3. Project skills — configured projects only (candidates are listed
+  //    separately). Each skills dir is scanned once; a dir several agents read
+  //    (.agents/skills) is attributed to 'universal' instead of whichever agent
+  //    happened to come first in the registry.
+  const { listConfiguredProjects } = await import('../projects/model.js')
+  const discoveredProjects = (await listConfiguredProjects()).map((p) => ({ name: p.name, path: p.path }))
   mark('discoverProjects')
+  const relOwners = new Map<string, AgentId[]>()
+  for (const agent of AGENTS) {
+    for (const rel of agent.projectPaths) relOwners.set(rel, [...(relOwners.get(rel) ?? []), agent.id])
+  }
   const projectTasks: (ScanTask & { projIndex: number })[] = []
   discoveredProjects.forEach((proj, projIndex) => {
-    for (const agent of AGENTS) {
-      for (const rel of agent.projectPaths) {
-        projectTasks.push({
-          label: `project:${proj.name}:${agent.id}`,
-          dir: path.join(proj.path, rel),
-          scope: 'project',
-          agent: agent.id,
-          projectName: proj.name,
-          projectPath: proj.path,
-          projIndex,
-        })
-      }
+    for (const [rel, owners] of relOwners) {
+      const agentId: AgentId = owners.length === 1 ? owners[0] : 'universal'
+      projectTasks.push({
+        label: `project:${proj.name}:${rel}`,
+        dir: path.join(proj.path, rel),
+        scope: 'project',
+        agent: agentId,
+        projectName: proj.name,
+        projectPath: proj.path,
+        projIndex,
+      })
     }
   })
   const projectResults = await runTasks(projectTasks)
