@@ -7,7 +7,7 @@ import { setupSandbox, writeSkill, settle } from './helpers'
 const home = setupSandbox()
 const warehouse = path.join(home, 'warehouse')
 fs.mkdirSync(path.join(home, '.config', 'skill-studio'), { recursive: true })
-fs.writeFileSync(path.join(home, '.config', 'skill-studio', 'ide-settings.json'), JSON.stringify({ customGlobalSkillsDir: warehouse }))
+fs.writeFileSync(path.join(home, '.config', 'skill-studio', 'ide-settings.json'), JSON.stringify({ customGlobalSkillsDir: warehouse, skillWarehouses: [path.join(home, 'Documents', 'kb', 'skills-warehouse')] }))
 
 // One warehouse skill linked from three agents: must be parsed once, listed once.
 const shared = writeSkill(warehouse, 'shared', '# shared body\n')
@@ -26,6 +26,11 @@ fs.writeFileSync(path.join(broken, 'SKILL.md'), '---\nname: broken\ndescription:
 // Project buried under a hidden dir must not be discovered by walking.
 writeSkill(path.join(home, 'Documents', '.hidden', 'proj', '.claude', 'skills'), 'hidden-proj')
 writeSkill(path.join(home, 'Documents', 'visible', '.claude', 'skills'), 'visible-proj')
+// A warehouse that lives under ~/Documents and contains project-like markers
+// (like the real 004-Resource/002-skills with its .claude/.agents dirs).
+const docWarehouse = path.join(home, 'Documents', 'kb', 'skills-warehouse')
+writeSkill(path.join(docWarehouse, '.claude', 'skills'), 'wh-inner')
+writeSkill(path.join(docWarehouse, 'bundle', '.agents', 'skills'), 'bundle-inner')
 
 let app: FastifyInstance
 let discovery: typeof import('../server/scanner/discovery')
@@ -74,6 +79,13 @@ describe('scan performance changes keep results correct', () => {
     const projects = (await discovery.discoverProjects()).map((p) => path.basename(p.path))
     expect(projects).toContain('visible')
     expect(projects).not.toContain('proj')
+  })
+
+  it('a skill warehouse (and anything inside it) is never a project', async () => {
+    const projects = (await discovery.discoverProjects()).map((p) => path.basename(p.path))
+    expect(projects).not.toContain('skills-warehouse')
+    expect(projects).not.toContain('bundle')
+    expect(projects).toContain('visible')
   })
 
   it('concurrent scans are coalesced, but a scan after markScanDirty is fresh', async () => {

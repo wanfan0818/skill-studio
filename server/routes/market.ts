@@ -4,7 +4,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import { invalidateCache } from './skills.js'
 import { copyDir } from '../utils/fs.js'
-import { readIdeSettingsFull } from '../settings.js'
+import { getWarehouseDirs } from '../settings.js'
 import { execFileSafe } from '../utils/exec.js'
 import { isPlainSegment, isSafeGithubName } from '../utils/safe.js'
 import { findOwningCloneDir } from './github.js'
@@ -105,8 +105,11 @@ export async function marketRoutes(app: FastifyInstance) {
         timeoutMs: 60000, // 60s for clone
       })
 
-      const settings = await readIdeSettingsFull()
-      if (scope === 'global' && settings.customGlobalSkillsDir) {
+      // `skills add` installs into ~/.claude/skills; "global" means the skill
+      // warehouse, so move it there when the warehouse is somewhere else.
+      const warehouse = (await getWarehouseDirs())[0]
+      const cliDir = path.join(os.homedir(), '.claude', 'skills')
+      if (scope === 'global' && path.resolve(warehouse) !== path.resolve(cliDir)) {
         let skillFolderName = ''
         const atIdx = target.lastIndexOf('@')
         if (atIdx !== -1) {
@@ -117,10 +120,10 @@ export async function marketRoutes(app: FastifyInstance) {
         }
 
         if (isPlainSegment(skillFolderName)) {
-          const srcPath = path.join(os.homedir(), '.claude', 'skills', skillFolderName)
-          const destPath = path.join(settings.customGlobalSkillsDir, skillFolderName)
+          const srcPath = path.join(cliDir, skillFolderName)
+          const destPath = path.join(warehouse, skillFolderName)
           try {
-            await fs.mkdir(settings.customGlobalSkillsDir, { recursive: true })
+            await fs.mkdir(warehouse, { recursive: true })
             try {
               await fs.rename(srcPath, destPath)
             } catch {

@@ -3,7 +3,7 @@ import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
 import { invalidateCache } from './skills.js'
-import { readIdeSettingsFull, writeIdeSettingsFull, type AppSettings } from '../settings.js'
+import { readIdeSettingsFull, writeIdeSettingsFull, warehouseDirsFrom, type AppSettings } from '../settings.js'
 
 const homedir = os.homedir()
 
@@ -11,9 +11,11 @@ const homedir = os.homedir()
 export async function settingsRoutes(app: FastifyInstance) {
   // GET /api/settings
   app.get('/api/settings', async () => {
-    const { githubToken, ...rest } = await readIdeSettingsFull()
+    const settings = await readIdeSettingsFull()
+    const { githubToken, ...rest } = settings
     // The token never leaves the server; the UI only needs to know it exists.
-    return { ok: true, settings: { ...rest, hasGithubToken: !!githubToken } }
+    // `warehouses` is the resolved list (including the default when unset).
+    return { ok: true, settings: { ...rest, hasGithubToken: !!githubToken, warehouses: warehouseDirsFrom(settings) } }
   })
 
   // POST /api/settings

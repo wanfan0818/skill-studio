@@ -4,7 +4,7 @@ import path from 'path'
 import fs from 'fs/promises'
 import { parseSkillMd } from '../scanner/parser.js'
 import { invalidateCache } from './skills.js'
-import { readIdeSettingsFull } from '../settings.js'
+import { getWarehouseDirs } from '../settings.js'
 import { execFileSafe } from '../utils/exec.js'
 import { copyDir } from '../utils/fs.js'
 import { isInside, isPlainSegment } from '../utils/safe.js'
@@ -229,8 +229,9 @@ export async function githubRoutes(app: FastifyInstance) {
 
     let destParentDir = ''
     if (scope === 'global') {
-      const settings = await readIdeSettingsFull()
-      destParentDir = settings.customGlobalSkillsDir || path.join(os.homedir(), '.claude', 'skills')
+      // "Global" = the skill warehouse, the single source that distribution
+      // links into every IDE (see server/distribution).
+      destParentDir = (await getWarehouseDirs())[0]
     } else {
       if (!projectPath) {
         reply.status(400)

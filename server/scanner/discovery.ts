@@ -17,7 +17,7 @@ import { classifyAll } from './taxonomy.js'
 import { detectSimilarSkills } from './similarity.js'
 import { computeHealth } from './health.js'
 import type { Skill, Project, ConflictGroup, ScanResult, ScanPathReport } from '../types.js'
-import { readIdeSettingsFull } from '../settings.js'
+import { readIdeSettingsFull, warehouseDirsFrom } from '../settings.js'
 import { analyzeSecurity } from './security.js'
 import { checkSkillDrift } from './drift.js'
 import { moveToTrash } from '../trash/store.js'
@@ -550,7 +550,28 @@ export async function discoverProjects(): Promise<{ name: string; path: string }
   }
 
   const excluded = await getExcludedProjects()
-  return projects.filter(p => !excluded.includes(path.resolve(p.path)))
+
+  // A skill warehouse is the library itself, never a project — even though it
+  // often contains .agents/.claude dirs that look like project markers. Treating
+  // it (or a skill bundle inside it, e.g. gstack) as a project offered it as an
+  // install target ("project" → <warehouse>/.claude/skills) and armed project
+  // sync on it.
+  const warehouseReals: string[] = []
+  for (const w of warehouseDirsFrom(await readIdeSettingsFull().catch(() => ({})))) {
+    warehouseReals.push(await fs.realpath(w).catch(() => path.resolve(w)))
+  }
+  const insideWarehouse = async (p: string) => {
+    const real = await fs.realpath(p).catch(() => path.resolve(p))
+    return warehouseReals.some((w) => real === w || real.startsWith(w + path.sep))
+  }
+
+  const out: { name: string; path: string }[] = []
+  for (const p of projects) {
+    if (excluded.includes(path.resolve(p.path))) continue
+    if (await insideWarehouse(p.path)) continue
+    out.push(p)
+  }
+  return out
 }
 
 export async function saveProjectToRegistry(projectPath: string, name?: string): Promise<void> {
