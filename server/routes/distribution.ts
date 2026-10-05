@@ -82,6 +82,7 @@ export async function distributionRoutes(app: FastifyInstance) {
           id: agent.id,
           name: agent.name,
           icon: agent.icon,
+          linkMode: agent.linkMode ?? 'symlink',
           dirs,
           exists,
           symlinkCount,

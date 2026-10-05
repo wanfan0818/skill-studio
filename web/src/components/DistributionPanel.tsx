@@ -1,7 +1,7 @@
 import { useCallback, useEffect, useMemo, useState } from 'react'
 
 type Mode = 'all' | 'global' | 'off'
-type ActionType = 'link' | 'relink' | 'unlink' | 'legacy' | 'conflict'
+type ActionType = 'link' | 'relink' | 'copy' | 'update' | 'unlink' | 'legacy' | 'conflict'
 
 interface AgentRow {
   id: string
@@ -12,6 +12,7 @@ interface AgentRow {
   symlinkCount: number
   realCount: number
   rule: { mode: Mode; include?: string[]; exclude?: string[] } | null
+  linkMode?: 'symlink' | 'copy'
   desired: number
   satisfied: number
   sharedDirWith: string[]
@@ -48,6 +49,8 @@ const MODE_LABEL: Record<string, string> = {
 const TYPE_META: Record<ActionType, { label: string; cls: string }> = {
   link: { label: '新增链接', cls: 'text-emerald-400' },
   relink: { label: '重新指向', cls: 'text-sky-400' },
+  copy: { label: '新增副本', cls: 'text-emerald-400' },
+  update: { label: '更新副本', cls: 'text-sky-400' },
   unlink: { label: '移除链接', cls: 'text-amber-400' },
   legacy: { label: '旧版遗留', cls: 'text-violet-400' },
   conflict: { label: '冲突（不处理）', cls: 'text-red-400' },
@@ -108,7 +111,7 @@ export function DistributionPanel({ onApplied }: { onApplied?: () => void }) {
   }
 
   const applicable = plan
-    ? plan.counts.link + plan.counts.relink + plan.counts.unlink + (includeLegacy ? plan.counts.legacy : 0)
+    ? plan.counts.link + plan.counts.relink + plan.counts.copy + plan.counts.update + plan.counts.unlink + (includeLegacy ? plan.counts.legacy : 0)
     : 0
 
   const handleApply = async () => {
@@ -256,6 +259,14 @@ export function DistributionPanel({ onApplied }: { onApplied?: () => void }) {
                   <div className="flex items-center gap-2">
                     <span className="text-base shrink-0">{a.icon}</span>
                     <span className="font-semibold text-slate-200 text-xs truncate">{a.name}</span>
+                    {a.linkMode === 'copy' && (
+                      <span
+                        className="px-1.5 py-0.5 rounded text-[9px] font-semibold bg-amber-500/10 text-amber-300 border border-amber-500/20"
+                        title="该 IDE 不识别软链接，分发为真实副本；仓库更新时自动刷新，在 IDE 内被修改过的副本不会被覆盖"
+                      >
+                        复制模式
+                      </span>
+                    )}
                   </div>
                   <div className="text-[10px] text-slate-500 truncate" title={a.dirs.join('\n')}>
                     {a.dirs[0] ?? '（无账号目录）'}

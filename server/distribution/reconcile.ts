@@ -9,6 +9,9 @@ import { isPlainSegment } from '../utils/safe.js'
 import { readDistribution, desiredNames, type DistributionState } from './state.js'
 import { withWriteLock } from './lock.js'
 import { mapLimit } from '../utils/concurrency.js'
+import { copyDir } from '../utils/fs.js'
+import { getSkillFolderHash } from '../scanner/drift.js'
+import { moveToTrash } from '../trash/store.js'
 
 /**
  * plan → apply reconciler for global skill distribution.
@@ -19,6 +22,13 @@ import { mapLimit } from '../utils/concurrency.js'
  * and are left alone — except "legacy" links (into project skill dirs or
  * other agents' dirs, or dangling) that older Skill Studio versions created;
  * those are reported separately and only removed on explicit opt-in.
+ *
+ * Copy mode (agents with linkMode 'copy', e.g. TeleAgent, which ignores
+ * symlinked skills): the agent gets real copies carrying a `.skill-source`
+ * marker { originPath, fingerprint }. A copy is managed only if its marker
+ * points into a warehouse. It is refreshed when the source changes — but
+ * never if the copy itself was modified after we wrote it (the agent may
+ * evolve skills in place); that is reported as a conflict instead.
  */
 
 export interface SourceSkill {
@@ -28,7 +38,7 @@ export interface SourceSkill {
   warehouse: string
 }
 
-export type ActionType = 'link' | 'relink' | 'unlink' | 'legacy' | 'conflict'
+export type ActionType = 'link' | 'relink' | 'copy' | 'update' | 'unlink' | 'legacy' | 'conflict'
 
 export interface PlanAction {
   id: string
@@ -44,6 +54,10 @@ export interface PlanAction {
   reason: string
   /** unlink only: the link's target no longer exists. */
   dangling?: boolean
+  /** How this target directory receives skills. */
+  mode: 'symlink' | 'copy'
+  /** The entry at linkPath is a managed physical copy (copy mode). */
+  isCopy?: boolean
 }
 
 export interface TargetSummary {
@@ -52,6 +66,7 @@ export interface TargetSummary {
   agentIds: string[]
   /** Agents without a rule that read the same physical directory. */
   sharedWith: string[]
+  mode: 'symlink' | 'copy'
   exists: boolean
   desired: number
   satisfied: number
@@ -77,6 +92,22 @@ interface Group {
   realDir: string
   agentIds: string[]
   unmanaged: string[]
+  /** 'copy' when any agent reading this directory ignores symlinks. */
+  mode: 'symlink' | 'copy'
+}
+
+interface CopyMarker {
+  originPath?: string
+  fingerprint?: string
+  [k: string]: unknown
+}
+
+async function readMarker(dir: string): Promise<CopyMarker | null> {
+  try {
+    return JSON.parse(await fs.readFile(path.join(dir, '.skill-source'), 'utf-8'))
+  } catch {
+    return null
+  }
 }
 
 /** Full picture shared by plan() and status queries. */
@@ -157,7 +188,8 @@ async function listGroups(state: DistributionState, warehouseReals: string[], wa
     for (const dir of agentGlobalPaths(agent, home)) {
       const realDir = (await realOr(dir)) ?? path.resolve(dir)
       let g = byReal.get(realDir)
-      if (!g) byReal.set(realDir, (g = { dir, realDir, agentIds: [], unmanaged: [] }))
+      if (!g) byReal.set(realDir, (g = { dir, realDir, agentIds: [], unmanaged: [], mode: 'symlink' }))
+      if (agent.linkMode === 'copy') g.mode = 'copy'
       if (state.agents[agent.id]) g.agentIds.push(agent.id)
       else g.unmanaged.push(agent.id)
     }
@@ -197,7 +229,7 @@ function fingerprintOf(actions: PlanAction[]): string {
 }
 
 function emptyCounts(): Record<ActionType, number> {
-  return { link: 0, relink: 0, unlink: 0, legacy: 0, conflict: 0 }
+  return { link: 0, relink: 0, copy: 0, update: 0, unlink: 0, legacy: 0, conflict: 0 }
 }
 
 /** `stateOverride` lets callers dry-run a hypothetical state without persisting it. */
@@ -241,8 +273,10 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
 
     const ok = new Set<string>()
     const seen = new Set<string>()
-    const push = (a: Omit<PlanAction, 'id' | 'agentIds' | 'dir'>) =>
-      actions.push({ ...a, id: `${a.type}:${a.linkPath}`, agentIds: g.agentIds, dir: g.dir })
+    const copyMode = g.mode === 'copy'
+    const push = (a: Omit<PlanAction, 'id' | 'agentIds' | 'dir' | 'mode'>) =>
+      actions.push({ ...a, id: `${a.type}:${a.linkPath}`, agentIds: g.agentIds, dir: g.dir, mode: g.mode })
+    const isWarehouseOrigin = (p: string) => warehouseParents.has(path.dirname(p)) || sourceReals.has(p)
 
     for (const entry of entries) {
       if (entry.name.startsWith('.')) continue
@@ -251,7 +285,24 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
       const want = desired.has(entry.name) ? sources.get(entry.name)! : null
 
       if (!entry.isSymbolicLink()) {
-        if (want) push({ type: 'conflict', name: entry.name, linkPath, current: linkPath, reason: '同名真实目录占用，未覆盖' })
+        const marker = copyMode && entry.isDirectory() ? await readMarker(linkPath) : null
+        const managedCopy = !!marker?.originPath && isWarehouseOrigin(marker.originPath)
+        if (!managedCopy) {
+          if (want) push({ type: 'conflict', name: entry.name, linkPath, current: linkPath, reason: '同名真实目录占用，未覆盖' })
+          continue
+        }
+        if (!want) {
+          push({ type: 'unlink', name: entry.name, linkPath, current: marker!.originPath, reason: '不在期望集合中（副本）', isCopy: true })
+          continue
+        }
+        const [copyHash, srcHash] = await Promise.all([getSkillFolderHash(linkPath), getSkillFolderHash(want.realPath)])
+        if (copyHash === srcHash) {
+          ok.add(entry.name)
+        } else if (!marker!.fingerprint || copyHash !== marker!.fingerprint) {
+          push({ type: 'conflict', name: entry.name, linkPath, current: linkPath, reason: '副本已在该 IDE 中被修改，未覆盖', isCopy: true })
+        } else {
+          push({ type: 'update', name: entry.name, linkPath, target: want.realPath, current: linkPath, reason: '仓库版本已更新，刷新副本', isCopy: true })
+        }
         continue
       }
 
@@ -262,12 +313,13 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
         warehouseParents.has(path.dirname(lexical)) ||
         (!!real && (warehouseParents.has(path.dirname(real)) || sourceReals.has(real)))
 
-      if (want && real === want.realPath) {
+      if (want && real === want.realPath && !copyMode) {
         ok.add(entry.name)
         continue
       }
       if (managed) {
-        if (want) push({ type: 'relink', name: entry.name, linkPath, target: want.realPath, current: real ?? lexical, reason: '链接指向旧位置，重新指向仓库' })
+        if (want && copyMode) push({ type: 'copy', name: entry.name, linkPath, target: want.realPath, current: real ?? lexical, reason: '软链接改为真实副本（该 IDE 不识别软链接）' })
+        else if (want) push({ type: 'relink', name: entry.name, linkPath, target: want.realPath, current: real ?? lexical, reason: '链接指向旧位置，重新指向仓库' })
         else push({ type: 'unlink', name: entry.name, linkPath, current: real ?? lexical, reason: real ? '不在期望集合中' : '仓库中已不存在（悬空链接）', dangling: !real })
         continue
       }
@@ -282,7 +334,7 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
         if (legacyReason) {
           // An old cross-link sits on a name the rules want: replace it with
           // the warehouse link, but only when legacy cleanup is opted in.
-          push({ type: 'legacy', name: entry.name, linkPath, target: want.realPath, current: real ?? lexical, reason: `${legacyReason}，占用了仓库同名 Skill，将改为指向仓库` })
+          push({ type: 'legacy', name: entry.name, linkPath, target: want.realPath, current: real ?? lexical, reason: `${legacyReason}，占用了仓库同名 Skill，将改为${copyMode ? '仓库副本' : '指向仓库'}` })
         } else {
           push({ type: 'conflict', name: entry.name, linkPath, current: real ?? lexical, reason: '同名链接指向仓库以外的位置，未覆盖' })
         }
@@ -294,7 +346,7 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
 
     for (const name of desired) {
       if (seen.has(name)) continue
-      push({ type: 'link', name, linkPath: path.join(g.dir, name), target: sources.get(name)!.realPath, reason: '新增' })
+      push({ type: copyMode ? 'copy' : 'link', name, linkPath: path.join(g.dir, name), target: sources.get(name)!.realPath, reason: copyMode ? '新增副本' : '新增' })
     }
 
     satisfied.set(g.realDir, ok)
@@ -303,6 +355,7 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
       realDir: g.realDir,
       agentIds: g.agentIds,
       sharedWith: g.unmanaged,
+      mode: g.mode,
       exists,
       desired: desired.size,
       satisfied: ok.size,
@@ -358,6 +411,37 @@ export interface ApplyResult {
   results: { id: string; ok: boolean; error?: string }[]
 }
 
+/**
+ * Copy `source` next to `linkPath` under a hidden temp name and stamp the
+ * marker; the caller renames it into place, so the agent never sees a
+ * half-written skill.
+ */
+async function materializeCopy(source: string, linkPath: string): Promise<string> {
+  const tmp = path.join(path.dirname(linkPath), `.${path.basename(linkPath)}.ss-tmp-${crypto.randomBytes(4).toString('hex')}`)
+  try {
+    await copyDir(source, tmp, { skip: (n) => n === '.git' })
+    const marker = (await readMarker(tmp)) ?? {}
+    Object.assign(marker, {
+      name: path.basename(linkPath),
+      originPath: source,
+      fingerprint: await getSkillFolderHash(source),
+      copiedAt: new Date().toISOString(),
+      managedBy: 'skill-studio',
+    })
+    await fs.writeFile(path.join(tmp, '.skill-source'), JSON.stringify(marker, null, 2), 'utf-8')
+    return tmp
+  } catch (err) {
+    await fs.rm(tmp, { recursive: true, force: true }).catch(() => {})
+    throw err
+  }
+}
+
+/** True when a managed copy still matches what we wrote (not edited in place). */
+async function copyUnmodified(dir: string): Promise<boolean> {
+  const marker = await readMarker(dir)
+  return !!marker?.fingerprint && (await getSkillFolderHash(dir)) === marker.fingerprint
+}
+
 async function lstatOrNull(p: string) {
   try {
     return await fs.lstat(p)
@@ -384,6 +468,27 @@ export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
           if (st) throw new Error('目标位置已被占用')
           await fs.mkdir(a.dir, { recursive: true })
           await fs.symlink(a.target!, a.linkPath, 'dir')
+        } else if (a.type === 'update') {
+          if (!st?.isDirectory() || st.isSymbolicLink() || !(await copyUnmodified(a.linkPath))) {
+            throw new Error('副本已被修改或已不是受管副本，未覆盖')
+          }
+          const tmp = await materializeCopy(a.target!, a.linkPath)
+          const old = `${tmp}-old`
+          await fs.rename(a.linkPath, old)
+          await fs.rename(tmp, a.linkPath)
+          await fs.rm(old, { recursive: true, force: true })
+        } else if (a.isCopy && a.type === 'unlink') {
+          if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error('已不是受管副本，未改动')
+          // An untouched copy is just a duplicate of the warehouse; an edited
+          // one goes to the recycle bin.
+          if (await copyUnmodified(a.linkPath)) await fs.rm(a.linkPath, { recursive: true, force: true })
+          else await moveToTrash(a.linkPath, a.name)
+        } else if (a.type === 'copy' || (a.type === 'legacy' && a.mode === 'copy' && a.target)) {
+          if (st && !st.isSymbolicLink()) throw new Error('目标位置已被占用')
+          await fs.mkdir(a.dir, { recursive: true })
+          const tmp = await materializeCopy(a.target!, a.linkPath)
+          if (st) await fs.unlink(a.linkPath) // replacing a symlink
+          await fs.rename(tmp, a.linkPath)
         } else {
           if (!st?.isSymbolicLink()) throw new Error('目标已不是符号链接，未改动')
           await fs.unlink(a.linkPath)

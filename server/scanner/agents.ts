@@ -59,6 +59,12 @@ export interface AgentDef {
   icon: string
   globalPaths: string[]
   projectPaths: string[]
+  /**
+   * How skills are distributed into this agent's global dir. Default 'symlink'.
+   * 'copy' for agents that ignore symlinked skills (they get real copies that
+   * Skill Studio keeps in sync with the warehouse).
+   */
+  linkMode?: 'symlink' | 'copy'
 }
 
 /**
@@ -419,6 +425,10 @@ export const AGENTS: AgentDef[] = [
     icon: '📡',
     globalPaths: ['.config/TeleAgent/users/*/skills'],
     projectPaths: [],
+    // TeleAgent registers only real directories: none of 216 symlinked
+    // skills showed up in its registry (skills-metadata.json) or its
+    // permission.skill allow-list, which matched the 30 real dirs exactly.
+    linkMode: 'copy',
   },
   {
     id: 'trae',

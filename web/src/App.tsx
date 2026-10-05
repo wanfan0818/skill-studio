@@ -95,7 +95,7 @@ function App() {
     fetch('/api/distribution/plan')
       .then((r) => r.json())
       .then((d) => {
-        if (d.ok) setPendingDist(d.plan.counts.link + d.plan.counts.relink + d.plan.counts.unlink)
+        if (d.ok) setPendingDist(d.plan.counts.link + d.plan.counts.relink + d.plan.counts.copy + d.plan.counts.update + d.plan.counts.unlink)
       })
       .catch(() => {})
   }, [allSkills, view, distTick])
