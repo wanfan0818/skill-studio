@@ -7,16 +7,21 @@ export interface ParsedSkill {
   frontmatter: SkillFrontmatter
   content: string
   rawContent: string
+  /** Set when the YAML frontmatter is malformed; frontmatter is then {}. */
+  parseError?: string
 }
 
 export async function parseSkillMd(skillMdPath: string): Promise<ParsedSkill> {
   const raw = await fs.readFile(skillMdPath, 'utf-8')
-  const { data, content } = matter(raw)
-
-  return {
-    frontmatter: data as SkillFrontmatter,
-    content: content.trim(),
-    rawContent: raw,
+  try {
+    // Passing an options object bypasses gray-matter's global cache. That
+    // cache stores an entry BEFORE parsing, so a malformed file throws once
+    // and then "parses" fine forever after (empty data) — and it never
+    // evicts, holding every SKILL.md version ever read in memory.
+    const { data, content } = matter(raw, {})
+    return { frontmatter: data as SkillFrontmatter, content: content.trim(), rawContent: raw }
+  } catch (err: any) {
+    return { frontmatter: {}, content: raw.trim(), rawContent: raw, parseError: err?.message || String(err) }
   }
 }
 

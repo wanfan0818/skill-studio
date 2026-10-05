@@ -10,12 +10,14 @@ import { Dashboard } from './components/Dashboard'
 import { SimilarView } from './components/SimilarView'
 import { TrashView } from './components/TrashView'
 import { SyncView } from './components/SyncView'
+import { DISTRIBUTION_CHANGED } from './components/DistributionPanel'
 import { ConflictsView } from './components/ConflictsView'
 import { AboutModal } from './components/AboutModal'
 import { Footer } from './components/Footer'
 import { ExploreView } from './components/ExploreView'
 import { ProjectsView } from './components/ProjectsView'
 import { UpdaterPanel } from './components/UpdaterPanel'
+import { GlobalSkillsModal } from './components/GlobalSkillsModal'
 import type { Skill } from './hooks/useSkills'
 import { AGENT_ORDER, AGENT_META } from './agents'
 
@@ -46,6 +48,16 @@ function App() {
   const [conflictRowBusy, setConflictRowBusy] = useState<Set<string>>(new Set())
   const [aboutOpen, setAboutOpen] = useState<boolean>(false)
   const [updaterOpen, setUpdaterOpen] = useState<boolean>(false)
+  const [globalModalOpen, setGlobalModalOpen] = useState<boolean>(false)
+  const [pendingDist, setPendingDist] = useState<number>(0)
+  const [syncTab, setSyncTab] = useState<'github' | 'symlinks' | 'settings' | undefined>(undefined)
+  const [distTick, setDistTick] = useState(0)
+
+  useEffect(() => {
+    const onChange = () => setDistTick((t) => t + 1)
+    window.addEventListener(DISTRIBUTION_CHANGED, onChange)
+    return () => window.removeEventListener(DISTRIBUTION_CHANGED, onChange)
+  }, [])
   const [sidebarOpen, setSidebarOpen] = useState<boolean>(() => {
     try {
       return localStorage.getItem('skill-hub:sidebar') !== 'closed'
@@ -76,6 +88,17 @@ function App() {
   useEffect(() => {
     refreshTrashCount()
   }, [refreshTrashCount])
+
+  // Pending distribution changes (e.g. a newly installed warehouse skill).
+  // Distribution is never applied implicitly any more; surface it instead.
+  useEffect(() => {
+    fetch('/api/distribution/plan')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.ok) setPendingDist(d.plan.counts.link + d.plan.counts.relink + d.plan.counts.copy + d.plan.counts.update + d.plan.counts.unlink)
+      })
+      .catch(() => {})
+  }, [allSkills, view, distTick])
 
   // Sync selectedSkill with the updated version in allSkills
   useEffect(() => {
@@ -283,6 +306,7 @@ function App() {
         currentView={view}
         onViewChange={(v: any) => {
           setView(v)
+          setSyncTab(undefined)
           setSelectedSkill(null) // 切换视图时清空选中的 Skill
         }}
         trashCount={trashCount}
@@ -358,6 +382,29 @@ function App() {
                     )}
                   </button>
 
+                  {pendingDist > 0 && (
+                    <button
+                      onClick={() => {
+                        setSyncTab('symlinks')
+                        setView('sync')
+                      }}
+                      className="px-2.5 py-1 rounded-lg border border-amber-500/30 bg-amber-500/10 hover:bg-amber-500/20 text-amber-300 text-xs font-semibold cursor-pointer"
+                      title="有尚未应用的 IDE 分发变更，点击前往预览并应用"
+                    >
+                      ⇄ 待分发 {pendingDist}
+                    </button>
+                  )}
+
+                  {/* Global Skill Center Button */}
+                  <button
+                    onClick={() => setGlobalModalOpen(true)}
+                    className="px-2.5 py-1 rounded-lg border border-emerald-500/30 bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-300 text-xs font-semibold transition-all flex items-center gap-1 cursor-pointer"
+                    title="配置全局 Skill，在全系统 IDE 中全局全域生效"
+                  >
+                    <span>🌐</span>
+                    <span>全局通用 Skill</span>
+                  </button>
+
                   {/* Updater Button */}
                   <button
                     onClick={() => setUpdaterOpen(true)}
@@ -371,7 +418,7 @@ function App() {
 
                   {/* Scan Button */}
                   <button
-                    onClick={scan}
+                    onClick={() => scan(true)}
                     disabled={loading}
                     className="px-3 py-1.5 bg-indigo-600 disabled:opacity-50 flex items-center gap-1.5 cursor-pointer"
                   >
@@ -389,8 +436,14 @@ function App() {
 
               {/* Scrollable Main Content */}
               <div className="flex-1 overflow-y-auto px-6 py-5 min-w-0">
+                {error && (
+                  <div className="mb-4 px-4 py-3 rounded-lg border border-rose-500/30 bg-rose-500/10 text-xs text-rose-300 flex items-start justify-between gap-3">
+                    <span className="whitespace-pre-wrap break-all">扫描失败：{error}</span>
+                    <button onClick={() => scan(true)} className="shrink-0 text-rose-200 hover:text-white cursor-pointer">重试</button>
+                  </div>
+                )}
                 {view === 'sync' ? (
-                  <SyncView allSkills={allSkills} />
+                  <SyncView key={syncTab ?? 'default'} allSkills={allSkills} initialTab={syncTab} />
                 ) : view === 'explore' ? (
                   <ExploreView projects={projects} onInstalled={scan} />
                 ) : view === 'conflicts' ? (
@@ -701,6 +754,16 @@ function App() {
         onClose={() => setUpdaterOpen(false)}
         onUpdated={scan}
       />
+
+      {globalModalOpen && (
+        <GlobalSkillsModal
+          allSkills={allSkills}
+          onClose={(refreshed) => {
+            setGlobalModalOpen(false)
+            if (refreshed) scan()
+          }}
+        />
+      )}
 
       {/* Bulk delete confirm (Global) */}
       {bulkDeleteConfirm && (

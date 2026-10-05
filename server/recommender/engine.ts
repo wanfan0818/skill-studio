@@ -117,8 +117,6 @@ export function recommendSkills(projectDescription: string, allSkills: Skill[]):
     let reason = ''
     
     const skillNameLower = skill.name.toLowerCase()
-    const skillDescLower = skill.description.toLowerCase()
-    const skillCategoryLower = (skill.category || '').toLowerCase()
 
     // 规则 A：Skill 名称直接出现在描述中 (极高权重)
     if (projectDescription.toLowerCase().includes(skillNameLower)) {

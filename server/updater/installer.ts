@@ -1,15 +1,14 @@
-import { exec } from 'child_process'
-import { promisify } from 'util'
 import os from 'os'
 import path from 'path'
 import fs from 'fs/promises'
 import type { SkillGithubSource } from '../types.js'
 import { writeSkillSource } from './source.js'
+import { execFileSafe } from '../utils/exec.js'
+import { copyDir } from '../utils/fs.js'
+import { isSafeGithubName, isSafeGitRef, isSafeSubPath } from '../utils/safe.js'
 
-const execAsync = promisify(exec)
-
-async function execSafe(cmd: string): Promise<{ stdout: string; stderr: string }> {
-  return execAsync(cmd, { stdio: ['ignore', 'pipe', 'pipe'] })
+function git(args: string[]) {
+  return execFileSafe('git', args)
 }
 
 export async function updateSkillFromGithub(
@@ -18,6 +17,13 @@ export async function updateSkillFromGithub(
   latestCommit?: string
 ): Promise<void> {
   const { owner, repo, branch, subPath } = source
+  // owner/repo/branch/subPath come from SKILL.md frontmatter or a .skill-source
+  // file, i.e. from third-party content. Validate before they reach git.
+  if (!isSafeGithubName(owner) || !isSafeGithubName(repo)) {
+    throw new Error(`非法的 GitHub 仓库标识: ${owner}/${repo}`)
+  }
+  if (branch && !isSafeGitRef(branch)) throw new Error(`非法的分支名: ${branch}`)
+  if (subPath && !isSafeSubPath(subPath)) throw new Error(`非法的子目录: ${subPath}`)
   const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-update-'))
 
   try {
@@ -26,16 +32,16 @@ export async function updateSkillFromGithub(
 
     if (subPath) {
       // Use sparse checkout to only download the subPath
-      await execSafe(`git init "${tempDir}"`)
-      await execSafe(`git -C "${tempDir}" remote add origin "${cloneUrl}"`)
-      await execSafe(`git -C "${tempDir}" config core.sparseCheckout true`)
+      await git(['init', '--', tempDir])
+      await git(['-C', tempDir, 'remote', 'add', 'origin', cloneUrl])
+      await git(['-C', tempDir, 'config', 'core.sparseCheckout', 'true'])
       
       const sparseCheckoutFile = path.join(tempDir, '.git', 'info', 'sparse-checkout')
       await fs.writeFile(sparseCheckoutFile, `${subPath}\n`, 'utf-8')
       
-      await execSafe(`git -C "${tempDir}" pull --depth=1 origin ${targetBranch}`)
+      await git(['-C', tempDir, 'pull', '--depth=1', 'origin', targetBranch])
     } else {
-      await execSafe(`git clone --depth 1 --branch ${targetBranch} "${cloneUrl}" "${tempDir}"`)
+      await git(['clone', '--depth', '1', '--branch', targetBranch, '--', cloneUrl, tempDir])
     }
 
     const srcDir = subPath ? path.join(tempDir, subPath) : tempDir
@@ -49,7 +55,7 @@ export async function updateSkillFromGithub(
     let commitHash = latestCommit
     if (!commitHash) {
       try {
-        const { stdout } = await execSafe(`git -C "${tempDir}" rev-parse HEAD`)
+        const { stdout } = await git(['-C', tempDir, 'rev-parse', 'HEAD'])
         commitHash = stdout.trim()
       } catch {
         commitHash = 'unknown'
@@ -57,7 +63,7 @@ export async function updateSkillFromGithub(
     }
 
     // Overwrite the files
-    await copyDirectoryContents(srcDir, skillRealPath)
+    await copyDir(srcDir, skillRealPath, { skip: (name) => name === '.git' || name === '.skill-source' })
 
     // Update .skill-source file with updated commit
     const updatedSource: SkillGithubSource = {
@@ -76,22 +82,3 @@ export async function updateSkillFromGithub(
   }
 }
 
-async function copyDirectoryContents(src: string, dest: string): Promise<void> {
-  const entries = await fs.readdir(src, { withFileTypes: true })
-  await fs.mkdir(dest, { recursive: true })
-
-  for (const entry of entries) {
-    if (entry.name === '.git' || entry.name === '.skill-source') {
-      continue
-    }
-
-    const srcPath = path.join(src, entry.name)
-    const destPath = path.join(dest, entry.name)
-
-    if (entry.isDirectory()) {
-      await copyDirectoryContents(srcPath, destPath)
-    } else {
-      await fs.copyFile(srcPath, destPath)
-    }
-  }
-}

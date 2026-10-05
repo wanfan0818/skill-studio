@@ -2,10 +2,7 @@ import fsSync from 'fs'
 import fs from 'fs/promises'
 import path from 'path'
 import os from 'os'
-import { exec } from 'child_process'
-import { promisify } from 'util'
-
-const execAsync = promisify(exec)
+import { execFileSafe } from '../utils/exec.js'
 
 const initialHttpProxy = process.env.HTTP_PROXY || process.env.http_proxy || null
 const initialHttpsProxy = process.env.HTTPS_PROXY || process.env.https_proxy || null
@@ -52,7 +49,7 @@ export async function setupProxy(): Promise<string | null> {
     // 2. 自动检测 macOS 系统代理
     if (process.platform === 'darwin') {
       try {
-        const { stdout } = await execAsync('scutil --proxy')
+        const { stdout } = await execFileSafe('scutil', ['--proxy'])
         let socksEnable = false
         let socksProxy = ''
         let socksPort = ''

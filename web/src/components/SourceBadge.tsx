@@ -45,3 +45,12 @@ export function ScopeBadge({ scope }: { scope: string }) {
     </span>
   )
 }
+
+export function WarehouseSourceBadge() {
+  return (
+    <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-xs font-semibold bg-indigo-500/20 text-indigo-400 ring-1 ring-indigo-500/30">
+      <span>🏛️</span>
+      <span>仓库原件</span>
+    </span>
+  )
+}

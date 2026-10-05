@@ -21,15 +21,17 @@ import type { HealthReport } from './scanner/health.js'
 import type { SecurityStatus } from './scanner/security.js'
 
 export interface SkillGithubSource {
-  owner: string
-  repo: string
-  branch: string
-  subPath: string
+  owner?: string
+  repo?: string
+  branch?: string
+  subPath?: string
   installedCommit?: string
   installedAt?: string
   lastChecked?: string
   updateAvailable?: boolean
   latestCommit?: string
+  originPath?: string
+  copiedAt?: string
 }
 
 export interface Skill {
@@ -50,9 +52,36 @@ export interface Skill {
   files: string[]
   enabled: boolean
   hasConflict: boolean
+  hasDrift?: boolean
   lastModified: string
   security?: SecurityStatus
-  githubSource?: SkillGithubSource // Added for GitHub update tracking
+  githubSource?: SkillGithubSource // Added for GitHub update tracking & distribution marker
+  linkedIdes?: string[] // IDE IDs that link to this skill
+  linkedProjects?: Array<{
+    name: string
+    path: string
+    agentId: string
+    isCopy?: boolean
+    hasDrift?: boolean
+  }>
+  isWarehouseSource?: boolean
+  isGlobalActive?: boolean
+  globalDeployments?: string[]
+}
+
+export interface GlobalSkillsConfig {
+  globalSkills: string[]
+  targetIdes?: string[]
+  updatedAt?: string
+}
+
+export interface IDESettings {
+  enabledAgentIds: string[]
+  customGlobalSkillsDir?: string
+  skillWarehouses?: string[]
+  githubToken?: string
+  httpProxy?: string
+  skillOverrides?: Record<string, { enabledIdes?: string[]; disabledIdes?: string[] }>
 }
 
 export interface Project {
@@ -91,6 +120,8 @@ export interface ScanResult {
   }
   scannedPaths: ScanPathReport[]
   durationMs: number
+  /** Per-phase wall time in ms, for /api/debug and benchmarks. */
+  timings?: Record<string, number>
 }
 
 export interface SkillProfile {
@@ -109,3 +140,19 @@ export interface ProjectWithProfile extends Project {
   profileSkillCount: number
   syncStatus: 'synced' | 'drift' | 'no-profile'
 }
+
+// ---- Wire types shared with the web client (web/src imports these with
+// `import type`, so the two sides can no longer drift apart silently). ----
+
+/** A skill as sent in list payloads: the SKILL.md text is omitted and is
+ *  fetched on demand from GET /api/skills/:id. */
+export type SkillDTO = Omit<Skill, 'content'> & { content?: string }
+
+export interface ConflictGroupDTO {
+  name: string
+  skills: SkillDTO[]
+}
+
+export type ScanStats = ScanResult['stats']
+
+export type { AgentId }

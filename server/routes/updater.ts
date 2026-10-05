@@ -73,7 +73,8 @@ export async function updaterRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Skill not found' })
     }
 
-    const source = await readSkillSource(skill.realPath)
+    // Fall back to the source the scan derived from frontmatter / manifests.
+    const source = (await readSkillSource(skill.realPath)) ?? (skill.githubSource?.owner ? { ...skill.githubSource } : null)
     if (!source) {
       return reply.status(400).send({ error: '该 Skill 尚未绑定 GitHub 来源' })
     }
@@ -106,7 +107,7 @@ export async function updaterRoutes(app: FastifyInstance) {
   // Checks all skills that have githubSource configured
   app.get('/api/skills/updater/check', async () => {
     const skills = await getSkillsList()
-    const githubSkills = skills.filter((s) => s.githubSource)
+    const githubSkills = skills.filter((s) => s.githubSource?.owner && s.githubSource?.repo)
 
     if (githubSkills.length === 0) {
       const rateLimit = await getGithubRateLimit()
@@ -187,7 +188,8 @@ export async function updaterRoutes(app: FastifyInstance) {
       return reply.status(404).send({ error: 'Skill not found' })
     }
 
-    const source = await readSkillSource(skill.realPath)
+    // Fall back to the source the scan derived from frontmatter / manifests.
+    const source = (await readSkillSource(skill.realPath)) ?? (skill.githubSource?.owner ? { ...skill.githubSource } : null)
     if (!source) {
       return reply.status(400).send({ error: '该 Skill 尚未绑定 GitHub 来源' })
     }
@@ -205,7 +207,7 @@ export async function updaterRoutes(app: FastifyInstance) {
   app.post('/api/skills/updater/update-all', async (req, reply) => {
     const skills = await getSkillsList()
     // Find all skills that have updates available
-    const toUpdate = skills.filter((s) => s.githubSource?.updateAvailable)
+    const toUpdate = skills.filter((s) => s.githubSource?.owner && s.githubSource?.updateAvailable)
 
     if (toUpdate.length === 0) {
       return { ok: true, updatedCount: 0 }
@@ -245,8 +247,6 @@ export async function updaterRoutes(app: FastifyInstance) {
 
   // POST /api/skills/updater/auto-link
   app.post('/api/skills/updater/auto-link', async (req, reply) => {
-    const { discoverProjects } = await import('../scanner/discovery.js')
-    const projects = await discoverProjects()
     const skills = await getSkillsList()
 
     let boundCount = 0

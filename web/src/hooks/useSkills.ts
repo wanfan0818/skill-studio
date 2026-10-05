@@ -1,60 +1,20 @@
 import { useState, useCallback } from 'react'
-import type { AgentId } from '../agents'
 import type { HealthReport, MergeSuggestion, CategorySummary } from '../components/HealthPanel'
 
-export interface SkillGithubSource {
-  owner: string
-  repo: string
-  branch: string
-  subPath: string
-  installedCommit?: string
-  installedAt?: string
-  lastChecked?: string
-  updateAvailable?: boolean
-  latestCommit?: string
-}
+// Wire types come from the server so both sides stay in sync.
+import type {
+  SkillDTO,
+  SkillGithubSource as ServerSkillGithubSource,
+  ScanStats,
+  Project as ServerProject,
+  ConflictGroupDTO,
+} from '../../../server/types'
 
-export interface Skill {
-  id: string
-  name: string
-  description: string
-  scope: 'global' | 'project' | 'plugin'
-  agent: AgentId
-  source: 'local' | 'newmax' | 'agents' | 'symlink' | 'unknown'
-  category: string
-  path: string
-  realPath: string
-  symlinkTarget?: string
-  projectName?: string
-  projectPath?: string
-  frontmatter: Record<string, any>
-  content: string
-  files: string[]
-  enabled: boolean
-  hasConflict: boolean
-  lastModified: string
-  githubSource?: SkillGithubSource
-}
-
-export interface Stats {
-  total: number
-  global: number
-  project: number
-  bySource: Record<string, number>
-  byAgent: Record<string, number>
-  byCategory: Record<string, number>
-}
-
-export interface Project {
-  name: string
-  path: string
-  skillCount: number
-}
-
-export interface ConflictGroup {
-  name: string
-  skills: Skill[]
-}
+export type Skill = SkillDTO
+export type SkillGithubSource = ServerSkillGithubSource
+export type Stats = ScanStats
+export type Project = ServerProject
+export type ConflictGroup = ConflictGroupDTO
 
 export function useSkills() {
   const [allSkills, setAllSkills] = useState<Skill[]>([])
@@ -68,13 +28,15 @@ export function useSkills() {
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
-  const scan = useCallback(async () => {
+  // force=false serves the server's cache (invalidated by file changes and
+  // every mutation); the manual scan button forces a rescan.
+  const scan = useCallback(async (force = false) => {
     setLoading(true)
     setError(null)
     try {
-      const res = await fetch('/api/scan')
-      if (!res.ok) throw new Error('Scan failed')
-      const data = await res.json()
+      const res = await fetch(force ? '/api/scan?force=1' : '/api/scan')
+      const data = await res.json().catch(() => null)
+      if (!res.ok || !data) throw new Error(data?.message || data?.error || `HTTP ${res.status}`)
       setAllSkills(data.skills)
       setSkills(data.skills)
       setStats(data.stats)
@@ -91,9 +53,12 @@ export function useSkills() {
   }, [])
 
   const filterSkills = useCallback(
-    (opts: { scope?: string; source?: string; agent?: string; category?: string; search?: string; project?: string; conflictOnly?: boolean }) => {
+    (opts: { scope?: string; source?: string; agent?: string; category?: string; search?: string; project?: string; conflictOnly?: boolean; globalOnly?: boolean }) => {
       let filtered = [...allSkills]
 
+      if (opts.globalOnly) {
+        filtered = filtered.filter((s) => s.isGlobalActive || s.scope === 'global')
+      }
       if (opts.scope && opts.scope !== 'all') {
         filtered = filtered.filter((s) => s.scope === opts.scope)
       }

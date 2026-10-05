@@ -1,69 +1,90 @@
-import chokidar from 'chokidar'
 import fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { allAgentGlobalAbsPaths } from './agents.js'
+import { getWarehouseDirs } from '../settings.js'
 
 const homedir = os.homedir()
 
 export type WatchCallback = (event: { type: string; path: string }) => void
 
-let watcher: chokidar.FSWatcher | null = null
-const ignoredPathNames = new Set(['node_modules', '.git'])
+/**
+ * File watching for the skill roots (warehouses + every agent's global dir).
+ *
+ * Uses Node's recursive fs.watch — FSEvents on macOS, ReadDirectoryChangesW
+ * on Windows — so each root costs one handle regardless of how many files it
+ * contains. The previous chokidar setup watched every file individually
+ * (following symlinks two levels deep), which on the real dataset held
+ * ~10 000 open descriptors. On macOS posix_spawn rejects descriptors at or
+ * above OPEN_MAX (10240) with EBADF, so once the watcher had eaten the low
+ * slots, spawning git / npx / tar failed intermittently with `spawn EBADF`.
+ */
 
-function isIgnoredPath(filePath: string): boolean {
-  return filePath.split(/[\\/]+/).some((part) => ignoredPathNames.has(part))
+let watchers: fs.FSWatcher[] = []
+let starting = false
+
+/** Only events that can change what a scan reports: an entry appearing or
+ *  disappearing in a skills root, or a SKILL.md being edited. */
+export function isRelevant(relPath: string): boolean {
+  const parts = relPath.split(/[\\/]+/).filter(Boolean)
+  if (parts.length === 0) return true
+  if (parts.some((p) => p === 'node_modules' || p === '.git')) return false
+  if (parts.length === 1) return !parts[0].startsWith('.') || parts[0] === '.skills-profile.json'
+  return parts.length === 2 && parts[1] === 'SKILL.md'
 }
 
-export function startWatcher(callback: WatchCallback): void {
-  if (watcher) return
-
-  const watchPaths = [
-    ...allAgentGlobalAbsPaths(homedir).map((x) => x.path),
-    path.join(homedir, '.newmax', 'skills'),
-  ]
-
-  // Only watch paths that exist
-  const validPaths = watchPaths.filter((p) => {
+/** Real, existing directories; drop any that live inside another watched root. */
+function dedupeRoots(dirs: string[]): string[] {
+  const reals: string[] = []
+  for (const d of dirs) {
     try {
-      fs.statSync(p)
-      return true
-    } catch {
-      return false
+      const real = fs.realpathSync(d)
+      if (fs.statSync(real).isDirectory() && !reals.includes(real)) reals.push(real)
+    } catch {}
+  }
+  reals.sort((a, b) => a.length - b.length)
+  return reals.filter((r, i) => !reals.slice(0, i).some((p) => r.startsWith(p + path.sep)))
+}
+
+export async function startWatcher(callback: WatchCallback): Promise<void> {
+  if (watchers.length || starting) return
+  starting = true
+
+  let warehouseDirs: string[] = []
+  try {
+    warehouseDirs = await getWarehouseDirs()
+  } catch (err: any) {
+    console.warn('[watcher] Could not read warehouse settings:', err?.message || err)
+  }
+  starting = false
+  if (watchers.length) return
+
+  const roots = dedupeRoots([...warehouseDirs, ...allAgentGlobalAbsPaths(homedir).map((x) => x.path)])
+
+  for (const root of roots) {
+    try {
+      const w = fs.watch(root, { recursive: true, persistent: true }, (eventType, filename) => {
+        const rel = filename ? filename.toString() : ''
+        if (!isRelevant(rel)) return
+        callback({ type: eventType, path: path.join(root, rel) })
+      })
+      w.on('error', (err) => console.warn(`[watcher] ${root}:`, err?.message || err))
+      watchers.push(w)
+    } catch (err: any) {
+      console.warn(`[watcher] Cannot watch ${root}:`, err?.message || err)
     }
-  })
-
-  if (validPaths.length === 0) return
-
-  watcher = chokidar.watch(validPaths, {
-    depth: 2,
-    ignoreInitial: true,
-    persistent: true,
-    followSymlinks: true,
-    ignored: isIgnoredPath,
-    awaitWriteFinish: {
-      stabilityThreshold: 300,
-      pollInterval: 100,
-    },
-  })
-
-  watcher
-    .on('add', (p) => callback({ type: 'add', path: p }))
-    .on('change', (p) => callback({ type: 'change', path: p }))
-    .on('unlink', (p) => callback({ type: 'unlink', path: p }))
-    .on('addDir', (p) => callback({ type: 'addDir', path: p }))
-    .on('unlinkDir', (p) => callback({ type: 'unlinkDir', path: p }))
-    .on('error', (err) => {
-      console.warn('[watcher] File watcher error encountered:', err.message || err)
-    })
+  }
 }
 
 export function stopWatcher(): void {
-
-  if (watcher) {
-    void watcher.close().catch((err) => {
-      console.warn('Failed to close file watcher:', err)
-    })
-    watcher = null
+  for (const w of watchers) {
+    try {
+      w.close()
+    } catch {}
   }
+  watchers = []
+}
+
+export function watchedRootCount(): number {
+  return watchers.length
 }

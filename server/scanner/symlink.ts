@@ -1,5 +1,4 @@
 import fs from 'fs/promises'
-import path from 'path'
 
 export interface SymlinkInfo {
   isSymlink: boolean
@@ -15,7 +14,11 @@ export async function resolveSymlink(filePath: string): Promise<SymlinkInfo> {
       const realPath = await fs.realpath(filePath)
       return { isSymlink: true, target, realPath }
     }
-    return { isSymlink: false, realPath: filePath }
+    let realPath = filePath
+    try {
+      realPath = await fs.realpath(filePath)
+    } catch {}
+    return { isSymlink: false, realPath }
   } catch {
     return { isSymlink: false, realPath: filePath }
   }

@@ -2,36 +2,10 @@ import { useState } from 'react'
 import type { Skill } from '../hooks/useSkills'
 import { getCategoryMeta } from './CategoryBadge'
 
-export interface Diagnostic {
-  type: string
-  severity: 'info' | 'warn' | 'danger'
-  title: string
-  detail: string
-  affectedSkillIds: string[]
-}
-
-export interface HealthReport {
-  level: 'green' | 'yellow' | 'red'
-  score: number
-  summary: string
-  diagnostics: Diagnostic[]
-}
-
-export interface MergeSuggestion {
-  category: string
-  categoryName: string
-  reason: string
-  skills: { id: string; name: string }[]
-  similarity: number
-}
-
-export interface CategorySummary {
-  id: string
-  name: string
-  icon: string
-  count: number
-  skillIds: string[]
-}
+export type { Diagnostic, HealthReport } from '../../../server/scanner/health'
+export type { MergeSuggestion, CategorySummary } from '../../../server/scanner/taxonomy'
+import type { HealthReport } from '../../../server/scanner/health'
+import type { MergeSuggestion, CategorySummary } from '../../../server/scanner/taxonomy'
 
 interface Props {
   health: HealthReport | null

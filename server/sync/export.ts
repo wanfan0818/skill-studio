@@ -132,7 +132,7 @@ function runTar(args: string[]): Promise<{ code: number; stderr: string }> {
         stderr += chunk.toString()
       })
     }
-    child.on('close', (code) => resolve({ code: code ?? -1, stderr }))
+    child.on('close', (code: number | null) => resolve({ code: code ?? -1, stderr }))
   })
 }
 

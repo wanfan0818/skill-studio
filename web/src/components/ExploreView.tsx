@@ -1,4 +1,4 @@
-import { useState, FormEvent, ReactNode } from 'react'
+import { useState, useEffect, FormEvent, ReactNode } from 'react'
 
 interface MarketItem {
   fullId: string
@@ -116,7 +116,7 @@ function parseMarkdown(md: string): ReactNode[] {
         {line}
       </p>
     )
-  }).filter((el): el is ReactNode => el !== null)
+  }).filter((el) => el !== null) as ReactNode[]
 }
 
 export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
@@ -130,6 +130,14 @@ export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
   const [installItem, setInstallItem] = useState<MarketItem | null>(null)
   const [scope, setScope] = useState<'global' | 'project'>('global')
   const [selectedProjectPath, setSelectedProjectPath] = useState('')
+  // Where "global" installs actually go: the first skill warehouse.
+  const [warehouse, setWarehouse] = useState<string>('')
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d) => setWarehouse(d?.settings?.warehouses?.[0] ?? ''))
+      .catch(() => {})
+  }, [])
   const [installing, setInstalling] = useState(false)
   const [installResult, setInstallResult] = useState<{ success: boolean; log: string } | null>(null)
 
@@ -487,9 +495,9 @@ export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
                         : 'border-slate-800 hover:border-slate-700 bg-slate-950/40 text-slate-400'
                     }`}
                   >
-                    <div className="font-bold text-sm mb-1 text-slate-200">全局范围 (Global)</div>
-                    <div className="text-[11px] text-slate-500">
-                      所有项目下的 AI 助手共享 (~/.claude/skills)
+                    <div className="font-bold text-sm mb-1 text-slate-200">安装到 Skill 仓库（推荐）</div>
+                    <div className="text-[11px] text-slate-500 break-all">
+                      放进 Skill 总目录{warehouse ? `（${warehouse}）` : ''}，再按分发规则链接到各个 IDE
                     </div>
                   </button>
 
@@ -504,9 +512,9 @@ export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
                         : 'border-slate-800 hover:border-slate-700 bg-slate-950/40 text-slate-400'
                     }`}
                   >
-                    <div className="font-bold text-sm mb-1 text-slate-200">项目范围 (Project)</div>
+                    <div className="font-bold text-sm mb-1 text-slate-200">安装到某个项目</div>
                     <div className="text-[11px] text-slate-500">
-                      仅在选定的某个项目下加载生效
+                      只在选定项目中生效（放进 &lt;项目&gt;/.claude/skills）
                     </div>
                   </button>
                 </div>
@@ -528,6 +536,16 @@ export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
                     </select>
                   </div>
                 )}
+
+                {/* Exact destination, so there are no surprises */}
+                <div className="text-[11px] text-slate-500 break-all">
+                  将安装到：
+                  <code className="text-slate-300 font-mono">
+                    {scope === 'global'
+                      ? `${warehouse || '<Skill 仓库>'}/${installItem.dirName || installItem.name}`
+                      : `${selectedProjectPath || '<项目>'}/.claude/skills/${installItem.dirName || installItem.name}`}
+                  </code>
+                </div>
 
                 <div className="flex items-center gap-3 pt-2">
                   <button

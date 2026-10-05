@@ -1,6 +1,9 @@
 import { useEffect, useState, useCallback } from 'react'
 import { getAgentMeta } from '../agents'
 import { ProjectWizard } from './ProjectWizard'
+import { WarehouseSkillPickerModal } from './WarehouseSkillPickerModal'
+import { ProjectManageModal } from './ProjectManageModal'
+import { DeleteProjectModal } from './DeleteProjectModal'
 import type { Skill } from '../hooks/useSkills'
 
 interface SkillProfile {
@@ -36,10 +39,33 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
   // 向导模态框状态
   const [wizardOpen, setWizardOpen] = useState(false)
   const [wizardEditingProject, setWizardEditingProject] = useState<ProjectWithProfile | null>(null)
+
+  // 专属项目管理控制台模态框状态
+  const [manageProject, setManageProject] = useState<ProjectWithProfile | null>(null)
+
+  // 仓库技能挑选弹窗状态
+  const [pickerProject, setPickerProject] = useState<ProjectWithProfile | null>(null)
   
+  // 删除确认模态框状态
+  const [deleteModalTarget, setDeleteModalTarget] = useState<{ name: string; path: string } | null>(null)
+
+  // 已排除/隐藏项目状态
+  const [excludedProjects, setExcludedProjects] = useState<string[]>([])
+  const [showExcludedPanel, setShowExcludedPanel] = useState(false)
+
   // 操作忙碌状态
   const [busyPaths, setBusyPaths] = useState<Set<string>>(new Set())
   const [message, setMessage] = useState<{ kind: 'info' | 'error' | 'success'; text: string } | null>(null)
+
+  const fetchExcludedProjects = useCallback(async () => {
+    try {
+      const res = await fetch('/api/projects/excluded')
+      const data = await res.json()
+      if (data.ok) {
+        setExcludedProjects(data.excludedProjects || [])
+      }
+    } catch {}
+  }, [])
 
   const fetchProjects = useCallback(async () => {
     setLoading(true)
@@ -52,12 +78,13 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
       } else {
         setError(data.error || '获取项目列表失败')
       }
+      await fetchExcludedProjects()
     } catch (err: any) {
       setError(err?.message || '网络请求错误，无法获取项目列表')
     } finally {
       setLoading(false)
     }
-  }, [])
+  }, [fetchExcludedProjects])
 
   useEffect(() => {
     fetchProjects()
@@ -155,6 +182,183 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
     }
   }
 
+  // 单技能切换绑定处理
+  const handleTogglePickerSkill = async (skillName: string, currentlyInstalled: boolean) => {
+    if (!pickerProject) return
+    const endpoint = currentlyInstalled ? '/api/projects/uninstall-skill' : '/api/projects/install-skill'
+    try {
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectPath: pickerProject.path,
+          skillName,
+          targetIde: pickerProject.profile?.targetIde || 'claude-code',
+        }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        // 本地更新 pickerProject state
+        setProjects((prev) =>
+          prev.map((p) => {
+            if (p.path === pickerProject.path && p.profile) {
+              const currentSkills = p.profile.skills || []
+              const nextSkills = currentlyInstalled
+                ? currentSkills.filter((s) => s !== skillName)
+                : [...currentSkills, skillName]
+              return {
+                ...p,
+                profile: { ...p.profile, skills: nextSkills },
+                profileSkillCount: nextSkills.length,
+              }
+            }
+            return p
+          })
+        )
+        setPickerProject((prev) => {
+          if (!prev || !prev.profile) return prev
+          const currentSkills = prev.profile.skills || []
+          const nextSkills = currentlyInstalled
+            ? currentSkills.filter((s) => s !== skillName)
+            : [...currentSkills, skillName]
+          return {
+            ...prev,
+            profile: { ...prev.profile, skills: nextSkills },
+            profileSkillCount: nextSkills.length,
+          }
+        })
+        onRefreshSkills()
+      } else {
+        setMessage({ kind: 'error', text: `配置 Skill 失败: ${data.error}` })
+      }
+    } catch (err: any) {
+      setMessage({ kind: 'error', text: `请求出错: ${err.message}` })
+    }
+  }
+
+  const handleUninstallSkill = async (projectPath: string, skillName: string) => {
+    try {
+      const res = await fetch('/api/projects/uninstall-skill', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath, skillName }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setProjects((prev) =>
+          prev.map((p) => {
+            if (p.path === projectPath && p.profile) {
+              const nextSkills = (p.profile.skills || []).filter((s) => s !== skillName)
+              return { ...p, profile: { ...p.profile, skills: nextSkills }, profileSkillCount: nextSkills.length }
+            }
+            return p
+          })
+        )
+        setManageProject((prev) => {
+          if (!prev || prev.path !== projectPath || !prev.profile) return prev
+          const nextSkills = (prev.profile.skills || []).filter((s) => s !== skillName)
+          return { ...prev, profile: { ...prev.profile, skills: nextSkills }, profileSkillCount: nextSkills.length }
+        })
+        onRefreshSkills()
+      } else {
+        setMessage({ kind: 'error', text: `解绑失败: ${data.error}` })
+      }
+    } catch (err: any) {
+      setMessage({ kind: 'error', text: `解绑出错: ${err.message}` })
+    }
+  }
+
+  const handleChangeIde = async (projectPath: string, newTargetIde: string) => {
+    try {
+      const targetProj = projects.find((p) => p.path === projectPath)
+      const currentSkills = targetProj?.profile?.skills || []
+      const currentDesc = targetProj?.profile?.description || '项目配置'
+
+      const res = await fetch('/api/projects/profile', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          projectPath,
+          targetIde: newTargetIde,
+          skills: currentSkills,
+          description: currentDesc,
+        }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setProjects((prev) =>
+          prev.map((p) => {
+            if (p.path === projectPath && p.profile) {
+              return { ...p, profile: { ...p.profile, targetIde: newTargetIde } }
+            }
+            return p
+          })
+        )
+        setManageProject((prev) => {
+          if (!prev || prev.path !== projectPath || !prev.profile) return prev
+          return { ...prev, profile: { ...prev.profile, targetIde: newTargetIde } }
+        })
+        onRefreshSkills()
+      }
+    } catch (err: any) {
+      setMessage({ kind: 'error', text: `更改 IDE 出错: ${err.message}` })
+    }
+  }
+
+  // 确定删除/隐藏项目
+  const handleConfirmDeleteProject = async (purgeFiles: boolean) => {
+    if (!deleteModalTarget) return
+    const { path: projectPath, name: projectName } = deleteModalTarget
+    setPathBusy(projectPath, true)
+    try {
+      const res = await fetch('/api/projects/delete', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath, purgeFiles }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setMessage({
+          kind: 'success',
+          text: `项目「${projectName}」已从列表中移除${purgeFiles ? ' (配置与技能目录已物理删除)' : ''}`,
+        })
+        await fetchProjects()
+        onRefreshSkills()
+      } else {
+        setMessage({ kind: 'error', text: `删除项目失败: ${data.error}` })
+      }
+    } catch (err: any) {
+      setMessage({ kind: 'error', text: `删除项目出错: ${err.message}` })
+    } finally {
+      setPathBusy(projectPath, false)
+      setDeleteModalTarget(null)
+    }
+  }
+
+  // 恢复显示项目
+  const handleRestoreProject = async (projectPath: string) => {
+    setPathBusy(projectPath, true)
+    try {
+      const res = await fetch('/api/projects/restore', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ projectPath }),
+      })
+      const data = await res.json()
+      if (data.ok) {
+        setMessage({ kind: 'success', text: '项目已恢复显示并纳入扫描' })
+        await fetchProjects()
+        onRefreshSkills()
+      } else {
+        setMessage({ kind: 'error', text: `恢复项目失败: ${data.error}` })
+      }
+    } catch (err: any) {
+      setMessage({ kind: 'error', text: `恢复项目出错: ${err.message}` })
+    } finally {
+      setPathBusy(projectPath, false)
+    }
+  }
+
   return (
     <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-950/40 text-slate-100">
       {/* 顶部标题栏 */}
@@ -167,13 +371,57 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
             将全局 Skill 按需软链接到指定项目中，有效降低大模型 Token 消耗并提速
           </p>
         </div>
-        <button
-          onClick={openWizardForCreate}
-          className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-lg shadow-blue-500/20 active:scale-95 transition flex items-center gap-2"
-        >
-          <span>＋</span> 新增项目配置
-        </button>
+        <div className="flex items-center gap-3">
+          {excludedProjects.length > 0 && (
+            <button
+              onClick={() => setShowExcludedPanel(!showExcludedPanel)}
+              className="px-3 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700 rounded-lg border border-slate-700/60 transition flex items-center gap-1.5"
+            >
+              <span>🙈</span>
+              <span>已隐藏的项目 ({excludedProjects.length})</span>
+            </button>
+          )}
+
+          <button
+            onClick={openWizardForCreate}
+            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-lg shadow-blue-500/20 active:scale-95 transition flex items-center gap-2"
+          >
+            <span>＋</span> 新增项目配置
+          </button>
+        </div>
       </div>
+
+      {/* 已排除/隐藏项目面板 */}
+      {showExcludedPanel && excludedProjects.length > 0 && (
+        <div className="px-8 pt-4">
+          <div className="p-4 bg-slate-900/60 rounded-xl border border-slate-800 space-y-3">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <span className="text-sm">🙈</span>
+                <h3 className="text-xs font-bold text-slate-200">已隐藏/排除的项目清单 ({excludedProjects.length})</h3>
+              </div>
+              <span className="text-[11px] text-slate-400">这些项目全盘扫描时将被自动跳过</span>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
+              {excludedProjects.map((pPath) => (
+                <div key={pPath} className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800/80 flex items-center justify-between gap-3 text-xs">
+                  <div className="min-w-0 flex-1 font-mono text-slate-400 truncate" title={pPath}>
+                    {pPath}
+                  </div>
+                  <button
+                    onClick={() => handleRestoreProject(pPath)}
+                    className="px-2.5 py-1 text-[11px] font-medium bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded transition shrink-0 flex items-center gap-1"
+                  >
+                    <span>🔄</span>
+                    <span>恢复显示</span>
+                  </button>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* 消息通知区 */}
       {message && (
@@ -281,12 +529,12 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
                       </p>
                     ) : (
                       <p className="text-xs text-slate-600 italic min-h-[2rem] mb-4 flex items-center">
-                        暂无项目描述，点击下方管理技能以创建。
+                        暂无项目描述，点击下方管理按钮进入操控台。
                       </p>
                     )}
 
                     {/* 信息行：包含的 IDE 和 Skill 数量 */}
-                    <div className="flex items-center gap-3 text-xs text-slate-400 mt-2">
+                    <div className="flex items-center justify-between text-xs text-slate-400 mt-2">
                       {/* IDE 图标标签 */}
                       {agentMeta ? (
                         <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md border ${agentMeta.color.bg} ${agentMeta.color.text} ${agentMeta.color.ring.replace('ring', 'border')}`}>
@@ -313,26 +561,53 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
                   </div>
 
                   {/* 卡片底部操作栏 */}
-                  <div className="px-5 py-3.5 bg-slate-900/30 border-t border-slate-800/40 flex items-center justify-between gap-2">
-                    <button
-                      disabled={isBusy}
-                      onClick={() => openWizardForEdit(proj)}
-                      className="text-xs font-medium text-slate-300 hover:text-white px-2.5 py-1.5 rounded hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition"
-                    >
-                      {profile ? '管理 Skill' : '创建配置'}
-                    </button>
+                  <div className="px-5 py-3.5 bg-slate-900/30 border-t border-slate-800/40 flex items-center justify-between gap-2 flex-wrap">
+                    <div className="flex items-center gap-2">
+                      <button
+                        disabled={isBusy}
+                        onClick={() => setPickerProject(proj)}
+                        className="text-xs font-semibold text-blue-400 hover:text-blue-300 px-2.5 py-1.5 rounded hover:bg-blue-500/10 border border-blue-500/30 transition flex items-center gap-1"
+                        title="打开仓库技能选择器，快捷配置此项目的技能"
+                      >
+                        <span>🏛️</span>
+                        <span>挑技能</span>
+                      </button>
+
+                      <button
+                        disabled={isBusy}
+                        onClick={() => {
+                          if (profile) {
+                            setManageProject(proj)
+                          } else {
+                            openWizardForEdit(proj)
+                          }
+                        }}
+                        className="text-xs font-medium text-slate-300 hover:text-white px-2.5 py-1.5 rounded hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition"
+                      >
+                        {profile ? '⚙️ 管理操控台' : '配置项目'}
+                      </button>
+                    </div>
 
                     <div className="flex items-center gap-2">
                       {profile && (
                         <button
                           disabled={isBusy}
                           onClick={() => handleClean(proj.path)}
-                          className="text-xs font-medium text-slate-500 hover:text-rose-400 px-2 py-1 rounded hover:bg-rose-500/5 transition"
+                          className="text-xs font-medium text-slate-500 hover:text-amber-400 px-2 py-1 rounded hover:bg-amber-500/5 transition"
                           title="清理项目下的所有软链接并删除项目配置文件"
                         >
                           清理
                         </button>
                       )}
+
+                      <button
+                        disabled={isBusy}
+                        onClick={() => setDeleteModalTarget({ name: proj.name, path: proj.path })}
+                        className="text-xs font-medium text-slate-500 hover:text-rose-400 px-1.5 py-1 rounded hover:bg-rose-500/10 transition"
+                        title="从 Skill Studio 中隐藏或彻底删除此项目"
+                      >
+                        🗑️
+                      </button>
 
                       {profile && (
                         <button
@@ -361,12 +636,58 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
         )}
       </div>
 
-      {/* 新建/编辑配置的向导模态框 */}
+      {/* 专属项目集中操控台模态框 */}
+      {manageProject && (
+        <ProjectManageModal
+          isOpen={!!manageProject}
+          onClose={() => setManageProject(null)}
+          project={manageProject}
+          allSkills={allSkills || []}
+          onUninstallSkill={handleUninstallSkill}
+          onChangeIde={handleChangeIde}
+          onOpenWarehousePicker={() => {
+            setPickerProject(manageProject)
+          }}
+          onSyncProject={async (path) => {
+            await handleSync(path)
+          }}
+          onDeleteProject={(projectPath, projectName) => {
+            setDeleteModalTarget({ name: projectName, path: projectPath })
+          }}
+        />
+      )}
+
+      {/* 删除确认模态框 */}
+      {deleteModalTarget && (
+        <DeleteProjectModal
+          isOpen={!!deleteModalTarget}
+          projectName={deleteModalTarget.name}
+          projectPath={deleteModalTarget.path}
+          onClose={() => setDeleteModalTarget(null)}
+          onConfirm={handleConfirmDeleteProject}
+        />
+      )}
+
+      {/* 新建/编辑配置的初始化向导模态框 */}
       {wizardOpen && (
         <ProjectWizard
           project={wizardEditingProject}
           allSkills={allSkills}
           onClose={handleWizardClose}
+        />
+      )}
+
+      {/* 仓库技能挑选模态框 */}
+      {pickerProject && (
+        <WarehouseSkillPickerModal
+          isOpen={!!pickerProject}
+          onClose={() => setPickerProject(null)}
+          projectName={pickerProject.name}
+          projectPath={pickerProject.path}
+          targetIde={pickerProject.profile?.targetIde || 'claude-code'}
+          installedSkillNames={pickerProject.profile?.skills || []}
+          allSkills={allSkills}
+          onToggleSkill={handleTogglePickerSkill}
         />
       )}
     </div>
