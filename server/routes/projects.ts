@@ -88,6 +88,7 @@ export async function projectRoutes(app: FastifyInstance) {
         counts: plan.counts,
         pending,
         strayDirs: plan.strayDirs,
+        inventory: plan.inventory,
         warnings: plan.warnings,
         fingerprint: plan.fingerprint,
         // legacy fields some views still read

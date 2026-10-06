@@ -31,8 +31,19 @@ interface ProjectRow {
   counts: Record<ActionType, number>
   pending: number
   strayDirs: { rel: string; readBy: string[]; managed: number; real: number }[]
+  inventory: InventoryItem[]
   warnings: string[]
   fingerprint: string
+}
+
+interface InventoryItem {
+  name: string
+  description: string
+  inList: boolean
+  source: 'local' | 'warehouse' | 'missing'
+  localRel?: string
+  foundIn: string[]
+  untrackedKind?: 'local' | 'leftover'
 }
 
 interface Candidate {
@@ -211,6 +222,7 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
               onToggleExpand={() => setExpanded(expanded === p.path ? null : p.path)}
               onSetIdes={(ides) => saveProfile(p, { ides })}
               onRemoveSkill={(name) => saveProfile(p, { skills: p.profile.skills.filter((s) => s !== name) })}
+              onAddSkills={(names) => saveProfile(p, { skills: [...p.profile.skills, ...names.filter((n) => !p.profile.skills.includes(n))] })}
               onPickSkills={() => setPickerProject(p)}
               onCleanup={(v) => setCleanup((c) => ({ ...c, [p.path]: v }))}
               onApply={() => applyProject(p)}
@@ -374,6 +386,7 @@ interface CardProps {
   onToggleExpand: () => void
   onSetIdes: (ides: string[]) => void
   onRemoveSkill: (name: string) => void
+  onAddSkills: (names: string[]) => void
   onPickSkills: () => void
   onCleanup: (v: boolean) => void
   onApply: () => void
@@ -381,31 +394,44 @@ interface CardProps {
   ideName: (id: string) => string
 }
 
+const SOURCE_BADGE: Record<InventoryItem['source'], { label: string; cls: string }> = {
+  local: { label: '项目自带', cls: 'bg-emerald-500/10 text-emerald-300' },
+  warehouse: { label: '仓库', cls: 'bg-slate-800 text-slate-400' },
+  missing: { label: '找不到来源', cls: 'bg-red-500/10 text-red-300' },
+}
+
+const LIST_PREVIEW = 12
+
 function ProjectCard(props: CardProps) {
   const { project: p, expanded, busy, cleanup } = props
+  const [showAll, setShowAll] = useState(false)
   const cleanupCount = p.counts.legacy
   const applicable = p.pending + (cleanup ? cleanupCount : 0)
-  const skills = p.profile.skills
-  const commonIdes = useMemo(() => props.ideCatalog.filter((i) => p.profile.ides.includes(i.id)), [props.ideCatalog, p.profile.ides])
+  const listed = p.inventory.filter((i) => i.inList)
+  const untracked = p.inventory.filter((i) => !i.inList)
+  const untrackedLocal = untracked.filter((i) => i.untrackedKind === 'local')
+  const visible = showAll ? listed : listed.slice(0, LIST_PREVIEW)
+  const ides = useMemo(() => props.ideCatalog.filter((i) => p.profile.ides.includes(i.id)), [props.ideCatalog, p.profile.ides])
 
   return (
     <div className="bg-slate-900/40 border border-slate-800/80 rounded-xl">
-      <div className="p-4 flex items-start justify-between gap-4 flex-wrap">
-        <button onClick={props.onToggleExpand} className="min-w-0 text-left cursor-pointer flex-1">
+      {/* Header */}
+      <div className="p-4 pb-2 flex items-start justify-between gap-4 flex-wrap">
+        <div className="min-w-0 flex-1">
           <div className="flex items-center gap-2 flex-wrap">
             <span className="text-sm font-semibold text-slate-100">{p.name}</span>
-            <span className="text-[11px] text-slate-500">{skills.length} 个 Skill</span>
+            <span className="text-[11px] text-slate-500">{listed.length} 个 Skill</span>
             {p.pending > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300">待同步 {p.pending}</span>}
             {p.counts.conflict > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-300">冲突 {p.counts.conflict}</span>}
-            {cleanupCount > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-violet-500/10 text-violet-300">旧目录 {cleanupCount}</span>}
-            {p.pending === 0 && p.counts.conflict === 0 && p.profile.ides.length > 0 && (
+            {untracked.length > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300">未纳入 {untracked.length}</span>}
+            {p.pending === 0 && p.counts.conflict === 0 && p.profile.ides.length > 0 && listed.length > 0 && (
               <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300">已同步</span>
             )}
           </div>
           <div className="text-[11px] text-slate-500 truncate mt-0.5" title={p.path}>{p.path}</div>
-        </button>
+        </div>
         <div className="flex gap-2 shrink-0">
-          <button onClick={props.onPickSkills} className="px-3 py-1 text-xs rounded bg-slate-800 text-slate-300 cursor-pointer">管理 Skill</button>
+          <button onClick={props.onPickSkills} className="px-3 py-1 text-xs rounded bg-slate-800 text-slate-300 hover:text-white cursor-pointer">＋ 添加 Skill</button>
           <button
             onClick={props.onApply}
             disabled={busy || applicable === 0}
@@ -421,51 +447,119 @@ function ProjectCard(props: CardProps) {
         {p.profile.ides.length === 0 && <div className="text-[11px] text-amber-400/90 mt-1.5">还没有选择 IDE，这个项目的 Skill 不会同步到任何地方。</div>}
       </div>
 
-      {expanded && (
-        <div className="border-t border-slate-800/80 p-4 space-y-3">
-          {skills.length === 0 ? (
-            <div className="text-xs text-slate-500">这个项目还没有 Skill，点「管理 Skill」添加。</div>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="text-xs w-full">
-                <thead>
-                  <tr className="text-slate-500">
-                    <th className="text-left font-medium py-1 pr-3">Skill</th>
-                    {commonIdes.map((ide) => (
-                      <th key={ide.id} className="font-medium py-1 px-2 text-center whitespace-nowrap" title={`写入 ${ide.writeDirs.join(' + ')}`}>
-                        {ide.icon} {ide.name}
-                        {ide.mode === 'copy' && <div className="text-[9px] text-amber-300/80 font-normal">副本</div>}
-                      </th>
-                    ))}
-                    <th />
-                  </tr>
-                </thead>
-                <tbody className="divide-y divide-slate-800/50">
-                  {skills.map((name) => (
-                    <tr key={name}>
-                      <td className="py-1.5 pr-3 font-mono text-slate-300 truncate max-w-[16rem]">/{name}</td>
-                      {commonIdes.map((ide) => {
-                        const st = p.matrix[name]?.[ide.id] ?? 'pending'
-                        return (
-                          <td key={ide.id} className={`text-center px-2 ${CELL[st].cls}`} title={CELL[st].label}>
-                            {CELL[st].icon}
-                          </td>
-                        )
-                      })}
-                      <td className="text-right">
-                        <button onClick={() => props.onRemoveSkill(name)} className="text-slate-600 hover:text-red-400 cursor-pointer" title="从项目移除">✕</button>
-                      </td>
-                    </tr>
+      {/* The project's skills — always visible */}
+      <div className="border-t border-slate-800/80 px-4 py-3">
+        {listed.length === 0 ? (
+          <div className="text-xs text-slate-500">
+            这个项目还没有 Skill。点「＋ 添加 Skill」从仓库添加
+            {untrackedLocal.length > 0 ? '，或把下面在项目里发现的 Skill 纳入列表。' : '。'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="text-xs w-full">
+              <thead>
+                <tr className="text-slate-500 text-[11px]">
+                  <th className="text-left font-medium pb-1.5 pr-3">项目里的 Skill（{listed.length}）</th>
+                  {ides.map((ide) => (
+                    <th key={ide.id} className="font-medium pb-1.5 px-2 text-center whitespace-nowrap" title={`写入 ${ide.writeDirs.join(' + ')}${ide.mode === 'copy' ? '（真实副本）' : ''}`}>
+                      {ide.icon} {ide.name}
+                    </th>
                   ))}
-                </tbody>
-              </table>
-              <div className="flex flex-wrap gap-3 mt-2 text-[10px] text-slate-500">
-                {(Object.keys(CELL) as CellStatus[]).map((k) => (
-                  <span key={k}><span className={CELL[k].cls}>{CELL[k].icon}</span> {CELL[k].label}</span>
+                  <th className="w-6" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {visible.map((item) => (
+                  <tr key={item.name} className="group">
+                    <td className="py-1.5 pr-3 max-w-[28rem]">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-slate-200 truncate">/{item.name}</span>
+                        <span
+                          className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded ${SOURCE_BADGE[item.source].cls}`}
+                          title={item.source === 'local' ? `位于 ${item.localRel}` : undefined}
+                        >
+                          {SOURCE_BADGE[item.source].label}
+                        </span>
+                      </div>
+                      {item.description && (
+                        <div className="text-[11px] text-slate-500 truncate" title={item.description}>{item.description}</div>
+                      )}
+                    </td>
+                    {ides.map((ide) => {
+                      const st = p.matrix[item.name]?.[ide.id] ?? 'pending'
+                      return (
+                        <td key={ide.id} className={`text-center px-2 ${CELL[st].cls}`} title={CELL[st].label}>
+                          {CELL[st].icon}
+                        </td>
+                      )
+                    })}
+                    <td className="text-right">
+                      <button
+                        onClick={() => props.onRemoveSkill(item.name)}
+                        className="text-slate-600 opacity-0 group-hover:opacity-100 hover:text-red-400 cursor-pointer"
+                        title={item.source === 'local' ? '从列表移除（项目里的文件不会删除）' : '从项目移除'}
+                      >
+                        ✕
+                      </button>
+                    </td>
+                  </tr>
                 ))}
-              </div>
+              </tbody>
+            </table>
+            {listed.length > LIST_PREVIEW && (
+              <button onClick={() => setShowAll((v) => !v)} className="mt-1.5 text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer">
+                {showAll ? '收起' : `显示全部 ${listed.length} 个`}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Found in the project folder but not on the list */}
+        {untracked.length > 0 && (
+          <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <span className="text-[11px] font-medium text-sky-200">在项目目录里发现、但不在列表中（{untracked.length}）</span>
+              {untrackedLocal.length > 1 && (
+                <button onClick={() => props.onAddSkills(untrackedLocal.map((i) => i.name))} className="text-[11px] text-sky-300 hover:text-white cursor-pointer">
+                  全部纳入项目自带的 {untrackedLocal.length} 个
+                </button>
+              )}
             </div>
-          )}
+            <div className="space-y-1">
+              {untracked.map((item) => (
+                <div key={item.name} className="flex items-center gap-2 text-xs">
+                  <span className="font-mono text-slate-300 truncate">/{item.name}</span>
+                  <span className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded ${item.untrackedKind === 'local' ? SOURCE_BADGE.local.cls : 'bg-slate-800 text-slate-500'}`}>
+                    {item.untrackedKind === 'local' ? `项目自带 · ${item.localRel}` : '旧链接/副本'}
+                  </span>
+                  <span className="text-[10px] text-slate-600 truncate flex-1" title={item.foundIn.join('\n')}>{item.foundIn.join('、')}</span>
+                  {item.source !== 'missing' && (
+                    <button onClick={() => props.onAddSkills([item.name])} className="shrink-0 text-[11px] px-2 py-0.5 rounded bg-sky-500/15 text-sky-200 hover:bg-sky-500/25 cursor-pointer">
+                      纳入列表
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1.5">纳入后会同步到项目的每个 IDE；不纳入也不会删除这些文件。</div>
+          </div>
+        )}
+      </div>
+
+      {/* Details */}
+      <div className="border-t border-slate-800/80 px-4 py-2">
+        <button onClick={props.onToggleExpand} className="text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer">
+          {expanded ? '收起详情' : `详情${p.strayDirs.length ? `（其它 IDE 目录 ${p.strayDirs.length}）` : ''}${p.warnings.length ? ` · ${p.warnings.length} 条提示` : ''}`}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="px-4 pb-4 space-y-3">
+          <div className="flex flex-wrap gap-3 text-[10px] text-slate-500">
+            {(Object.keys(CELL) as CellStatus[]).map((k) => (
+              <span key={k}><span className={CELL[k].cls}>{CELL[k].icon}</span> {CELL[k].label}</span>
+            ))}
+          </div>
 
           {p.warnings.length > 0 && (
             <ul className="text-[11px] text-amber-400/90 list-disc pl-4">{p.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
@@ -482,9 +576,9 @@ function ProjectCard(props: CardProps) {
                   {d.managed > 0 && d.readBy.some((id) => p.profile.ides.includes(id)) && (
                     <span className="text-amber-300/90">；应用时会迁移到项目的写入目录，避免同一个 IDE 看到两份</span>
                   )}
-                  {d.readBy.some((id) => !p.profile.ides.includes(id)) && d.readBy.length > 0 && (
+                  {d.readBy.length > 0 && d.readBy.some((id) => !p.profile.ides.includes(id)) && (
                     <button
-                      onClick={() => props.onSetIdes([...p.profile.ides, ...d.readBy.filter((id) => !p.profile.ides.includes(id)).slice(0, 1)])}
+                      onClick={() => props.onSetIdes([...p.profile.ides, d.readBy.find((id) => !p.profile.ides.includes(id))!])}
                       className="ml-2 underline hover:text-slate-200 cursor-pointer"
                     >
                       把 {props.ideName(d.readBy.find((id) => !p.profile.ides.includes(id))!)} 加入项目

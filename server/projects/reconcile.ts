@@ -39,6 +39,21 @@ import { readProfile, type ProjectProfile } from './model.js'
  * removed with includeLegacy ("清理旧目录").
  */
 
+export interface InventoryItem {
+  name: string
+  description: string
+  /** On the project's skill list. */
+  inList: boolean
+  /** Where its content comes from: the project itself, the warehouse, or nowhere. */
+  source: 'local' | 'warehouse' | 'missing'
+  /** For project-local skills: the dir it lives in. */
+  localRel?: string
+  /** Project skill dirs where an entry with this name exists. */
+  foundIn: string[]
+  /** Not on the list: kind of entry found (own real dir vs leftover link/copy). */
+  untrackedKind?: 'local' | 'leftover'
+}
+
 export type CellStatus = 'ok' | 'pending' | 'outdated' | 'conflict' | 'unavailable' | 'local'
 
 export interface ProjectPlan {
@@ -52,6 +67,11 @@ export interface ProjectPlan {
   counts: Record<ActionType, number>
   /** Skill dirs in the project that no selected IDE writes to. */
   strayDirs: { rel: string; readBy: string[]; managed: number; real: number }[]
+  /**
+   * What the project contains: every listed skill, plus skills found in the
+   * project's skill dirs that are NOT on the list (e.g. created in place).
+   */
+  inventory: InventoryItem[]
   warnings: string[]
   fingerprint: string
 }
@@ -89,14 +109,16 @@ async function projectLocalSources(projectPath: string): Promise<Map<string, Loc
       const full = path.join(dir, e.name)
       if ((await readMarker(full))?.originPath) continue // a managed copy, not a source
       let name = e.name
+      let description: string | undefined
       try {
-        const fm = (await parseSkillMd(path.join(full, 'SKILL.md'))).frontmatter?.name
-        if (typeof fm === 'string' && fm.trim()) name = fm.trim()
+        const fm = (await parseSkillMd(path.join(full, 'SKILL.md'))).frontmatter
+        if (typeof fm?.name === 'string' && fm.name.trim()) name = fm.name.trim()
+        if (typeof fm?.description === 'string') description = fm.description
       } catch {
         continue // no SKILL.md → not a skill
       }
       if (!isPlainSegment(name) || out.has(name)) continue
-      out.set(name, { name, path: full, realPath: (await realOr(full)) ?? full, warehouse: projectPath, rel })
+      out.set(name, { name, path: full, realPath: (await realOr(full)) ?? full, warehouse: projectPath, rel, description })
     }
   }
   return out
@@ -156,8 +178,14 @@ export async function planProject(projectPath: string, opts: { profile?: Project
     ctx.warehouseParents.has(path.dirname(lexical)) ||
     ctx.agentDirReals.has(path.dirname(lexical))
 
+  // Relative links must be computed between REAL paths: a lexical path through
+  // a symlinked parent (e.g. /var → /private/var) yields the wrong number of
+  // `..` and a dangling link.
+  const projectReal = (await realOr(projectPath)) ?? path.resolve(projectPath)
   for (const t of targets.values()) {
     const copyMode = t.mode === 'copy'
+    const linkBase = (await realOr(t.dir)) ?? path.join(projectReal, t.rel)
+    const relativeTo = (target: string) => path.relative(linkBase, target)
     const push = (a: Omit<PlanAction, 'id' | 'agentIds' | 'dir' | 'mode' | 'projectPath'>) =>
       actions.push({ ...a, id: `${a.type}:${a.linkPath}`, agentIds: t.agentIds, dir: t.dir, mode: t.mode, projectPath })
     const entries = await fs.readdir(t.dir, { withFileTypes: true }).catch(() => [])
@@ -217,7 +245,7 @@ export async function planProject(projectPath: string, opts: { profile?: Project
         } else setStatus(t.realDir, entry.name, 'ok')
         continue
       }
-      const linkText = want && local.has(entry.name) ? path.relative(t.dir, want.realPath) : undefined
+      const linkText = want && local.has(entry.name) ? relativeTo(want.realPath) : undefined
       if (!want) {
         if (managed) push({ type: 'unlink', name: entry.name, linkPath, current: real ?? lexical, reason: real ? '不在项目 Skill 列表中' : '悬空链接', dangling: !real })
         else push({ type: 'legacy', name: entry.name, linkPath, current: real ?? lexical, reason: '指向未知位置的链接（非 Skill Studio 管理）' })
@@ -236,7 +264,7 @@ export async function planProject(projectPath: string, opts: { profile?: Project
         name,
         linkPath: path.join(t.dir, name),
         target: src.realPath,
-        linkText: !copyMode && local.has(name) ? path.relative(t.dir, src.realPath) : undefined,
+        linkText: !copyMode && local.has(name) ? relativeTo(src.realPath) : undefined,
         reason: copyMode ? '新增副本' : '新增',
       })
       setStatus(t.realDir, name, 'pending')
@@ -284,6 +312,45 @@ export async function planProject(projectPath: string, opts: { profile?: Project
     if (managed || realCount) strayDirs.push({ rel, readBy, managed, real: realCount })
   }
 
+  // Inventory: listed skills + anything else sitting in the project's skill dirs.
+  const foundIn = new Map<string, Set<string>>()
+  const untrackedKind = new Map<string, 'local' | 'leftover'>()
+  for (const rel of allAgentProjectRelPaths()) {
+    const entries = await fs.readdir(path.join(projectPath, rel), { withFileTypes: true }).catch(() => [])
+    for (const e of entries) {
+      if (e.name.startsWith('.') || !(e.isDirectory() || e.isSymbolicLink())) continue
+      if (!foundIn.has(e.name)) foundIn.set(e.name, new Set())
+      foundIn.get(e.name)!.add(rel)
+    }
+  }
+  for (const s of local.values()) untrackedKind.set(s.name, 'local')
+  const listed = new Set(profile?.skills ?? [])
+  const inventory: InventoryItem[] = []
+  for (const name of profile?.skills ?? []) {
+    const src = local.get(name) ?? ctx.warehouseSources.get(name)
+    inventory.push({
+      name,
+      description: src?.description ?? '',
+      inList: true,
+      source: local.has(name) ? 'local' : src ? 'warehouse' : 'missing',
+      localRel: local.get(name)?.rel,
+      foundIn: [...(foundIn.get(name) ?? [])],
+    })
+  }
+  for (const [name, rels] of foundIn) {
+    if (listed.has(name)) continue
+    const src = local.get(name) ?? ctx.warehouseSources.get(name)
+    inventory.push({
+      name,
+      description: src?.description ?? '',
+      inList: false,
+      source: local.has(name) ? 'local' : src ? 'warehouse' : 'missing',
+      localRel: local.get(name)?.rel,
+      foundIn: [...rels],
+      untrackedKind: untrackedKind.get(name) ?? 'leftover',
+    })
+  }
+
   // Matrix: per IDE, a skill is as good as its worst write dir.
   const rank: CellStatus[] = ['unavailable', 'conflict', 'outdated', 'pending', 'local', 'ok']
   const matrix: ProjectPlan['matrix'] = {}
@@ -319,6 +386,7 @@ export async function planProject(projectPath: string, opts: { profile?: Project
     actions,
     counts,
     strayDirs,
+    inventory,
     warnings,
     fingerprint: fingerprintOf(actions),
   }

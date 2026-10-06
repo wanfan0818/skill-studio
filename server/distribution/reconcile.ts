@@ -36,6 +36,7 @@ export interface SourceSkill {
   path: string
   realPath: string
   warehouse: string
+  description?: string
 }
 
 export type ActionType = 'link' | 'relink' | 'copy' | 'update' | 'unlink' | 'legacy' | 'conflict'
@@ -156,10 +157,12 @@ export async function listSources(warehouses: string[], warnings: string[]): Pro
           return null
         }
         let name = entry.name
+        let description: string | undefined
         try {
           const parsed = await parseSkillMd(path.join(real, 'SKILL.md'))
           const fmName = parsed.frontmatter?.name
           if (typeof fmName === 'string' && fmName.trim()) name = fmName.trim()
+          if (typeof parsed.frontmatter?.description === 'string') description = parsed.frontmatter.description
         } catch {
           // No SKILL.md: still a skill if the directory has any file (scanner parity).
           const files = await fs.readdir(real, { withFileTypes: true }).catch(() => [])
@@ -169,7 +172,7 @@ export async function listSources(warehouses: string[], warnings: string[]): Pro
           warnings.push(`Skill 名称无法用作目录名，已跳过: ${entryPath}`)
           return null
         }
-        return { name, path: entryPath, realPath: real, warehouse: wh }
+        return { name, path: entryPath, realPath: real, warehouse: wh, description }
       },
     )
     for (const s of found) {
