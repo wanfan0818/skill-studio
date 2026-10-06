@@ -218,9 +218,49 @@ async function listenWithRetry(startPort: number): Promise<number> {
 
 const basePort = parseInt(process.env.PORT || '3456')
 
+function openInBrowser(url: string) {
+  if (process.env.SKILL_STUDIO_NO_OPEN === '1' || process.env.SKILL_HUB_NO_OPEN === '1') return
+  import('child_process')
+    .then(({ execFile }) => {
+      const cmd = process.platform === 'darwin' ? 'open' : process.platform === 'win32' ? 'explorer' : 'xdg-open'
+      execFile(cmd, [url], () => {})
+    })
+    .catch(() => {})
+}
+
+// Single instance (production build only; `npm run dev` is never affected).
+const isProductionBuild = __filename.endsWith(path.join('dist', 'server', 'index.js'))
+const singleInstance = isProductionBuild && process.env.SKILL_STUDIO_ALLOW_MULTIPLE !== '1'
+let build = ''
+let startPort = basePort
+if (singleInstance) {
+  const { currentBuild, resolveStartup } = await import('./instance.js')
+  let version = '0.0.0'
+  try {
+    version = JSON.parse(fs.readFileSync(path.resolve(__dirname, '../../package.json'), 'utf-8')).version
+  } catch {}
+  build = currentBuild(__filename, version)
+  const decision = await resolveStartup(basePort, build)
+  if (decision.action === 'reuse') {
+    const url = `http://localhost:${decision.existing.port}`
+    console.log(`\n✅ Skill Studio（同一版本）已在运行：\x1b[36m${url}\x1b[0m（pid ${decision.existing.pid}），不再重复启动。`)
+    console.log(`\x1b[90m   如需重启，先在原终端按 Ctrl+C，或设置 SKILL_STUDIO_ALLOW_MULTIPLE=1。\x1b[0m\n`)
+    if (staticRoot) openInBrowser(url)
+    process.exit(0)
+  }
+  for (const s of decision.stopped) {
+    console.log(`\x1b[33m♻️  已停止旧版本 Skill Studio（pid ${s.pid}，端口 ${s.port}），由新版本接管\x1b[0m`)
+  }
+  startPort = decision.port
+}
+
 try {
-  const actualPort = await listenWithRetry(basePort)
+  const actualPort = await listenWithRetry(startPort)
   const url = `http://localhost:${actualPort}`
+  if (singleInstance) {
+    const { recordInstance } = await import('./instance.js')
+    await recordInstance({ pid: process.pid, port: actualPort, build, startedAt: new Date().toISOString() }).catch(() => {})
+  }
 
   // Record the port for the Vite dev proxy — in the config dir, not the
   // user's current working directory.
@@ -263,15 +303,7 @@ try {
   console.log(`👀 File watcher starts when Web UI connects`)
   console.log(`\x1b[90m💡 下次启动直接敲: \x1b[0m\x1b[36mskill-studio\x1b[0m\x1b[90m  (或访问 ${url})\x1b[0m\n`)
 
-  if (staticRoot && process.env.SKILL_STUDIO_NO_OPEN !== '1' && process.env.SKILL_HUB_NO_OPEN !== '1') {
-    try {
-      const { exec } = await import('child_process')
-      const cmd = process.platform === 'darwin' ? 'open'
-                : process.platform === 'win32' ? 'start'
-                : 'xdg-open'
-      exec(`${cmd} ${url}`, () => {})
-    } catch {}
-  }
+  if (staticRoot) openInBrowser(url)
 
 } catch (err) {
   console.error('\x1b[31m❌ Failed to start server:\x1b[0m', err)
