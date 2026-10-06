@@ -12,6 +12,7 @@ import {
 } from '../scanner/discovery.js'
 import { projectCapableAgents } from '../scanner/agents.js'
 import { recommendSkills } from '../recommender/engine.js'
+import { resolvePreferredIdes } from '../ides.js'
 import { invalidateCache } from './skills.js'
 import { isPlainSegment } from '../utils/safe.js'
 import { PlanChangedError } from '../distribution/reconcile.js'
@@ -59,16 +60,21 @@ function idesFrom(body: any, fallback: string[] = []): string[] {
 
 export async function projectRoutes(app: FastifyInstance) {
   // IDEs that can be project targets (for the IDE picker).
+  // Only the user's preferred IDEs are offered (unused ones stay out of pickers).
   app.get('/api/projects/ides', async () => {
+    const { ides: preferred } = await resolvePreferredIdes()
     return {
       ok: true,
-      ides: projectCapableAgents().map((a) => ({
-        id: a.id,
-        name: a.name,
-        icon: a.icon,
-        writeDirs: a.projectWritePaths ?? [a.projectPaths[0]],
-        mode: a.projectLinkMode ?? 'symlink',
-      })),
+      ides: projectCapableAgents()
+        .filter((a) => preferred.includes(a.id))
+        .map((a) => ({
+          id: a.id,
+          name: a.projectViaGlobal ? `${a.name}（账号级）` : a.name,
+          icon: a.icon,
+          writeDirs: a.projectViaGlobal ? ['账号级 skills 目录（所有项目共用）'] : (a.projectWritePaths ?? [a.projectPaths[0]]),
+          mode: a.projectViaGlobal || a.projectLinkMode === 'copy' ? 'copy' : 'symlink',
+          viaGlobal: !!a.projectViaGlobal,
+        })),
     }
   })
 

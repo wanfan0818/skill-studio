@@ -3,6 +3,7 @@ import { ProjectWizard } from './ProjectWizard'
 import { WarehouseSkillPickerModal } from './WarehouseSkillPickerModal'
 import { DeleteProjectModal } from './DeleteProjectModal'
 import type { Skill } from '../hooks/useSkills'
+import { PREFERRED_IDES_CHANGED } from '../hooks/usePreferredIdes'
 
 type CellStatus = 'ok' | 'pending' | 'outdated' | 'conflict' | 'unavailable' | 'local'
 type ActionType = 'link' | 'relink' | 'copy' | 'update' | 'unlink' | 'legacy' | 'conflict'
@@ -13,6 +14,8 @@ interface IdeInfo {
   icon: string
   writeDirs: string[]
   mode: 'symlink' | 'copy'
+  /** No project-level skills (TeleAgent): uses its account-level set. */
+  viaGlobal?: boolean
 }
 
 interface ProjectProfile {
@@ -119,6 +122,8 @@ export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) 
 
   useEffect(() => {
     refresh()
+    window.addEventListener(PREFERRED_IDES_CHANGED, refresh)
+    return () => window.removeEventListener(PREFERRED_IDES_CHANGED, refresh)
   }, [refresh])
 
   const afterChange = async (text?: string, kind: 'ok' | 'err' = 'ok') => {
@@ -445,6 +450,11 @@ function ProjectCard(props: CardProps) {
       <div className="px-4 pb-3">
         <IdePicker catalog={props.ideCatalog} selected={p.profile.ides} onChange={props.onSetIdes} disabled={busy} hint="同步到：" />
         {p.profile.ides.length === 0 && <div className="text-[11px] text-amber-400/90 mt-1.5">还没有选择 IDE，这个项目的 Skill 不会同步到任何地方。</div>}
+        {ides.some((i) => i.viaGlobal) && (
+          <div className="text-[11px] text-sky-300/80 mt-1.5">
+            {ides.filter((i) => i.viaGlobal).map((i) => i.name).join('、')}没有项目级 Skill：这里的仓库 Skill 会以副本放进它的账号级目录，在它的所有项目里都可见。
+          </div>
+        )}
       </div>
 
       {/* The project's skills — always visible */}

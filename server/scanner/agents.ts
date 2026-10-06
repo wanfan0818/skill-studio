@@ -76,6 +76,12 @@ export interface AgentDef {
   /** Project dirs older Skill Studio versions wrote to that the agent never
    *  reads; only offered for (opt-in) cleanup. */
   projectLegacyPaths?: string[]
+  /**
+   * The agent has no project-level skills, only an account/global set. A
+   * project can still select it: its skills are added to the agent's global
+   * directory (through global distribution), visible in every project.
+   */
+  projectViaGlobal?: boolean
 }
 
 /**
@@ -455,6 +461,10 @@ export const AGENTS: AgentDef[] = [
     // skills showed up in its registry (skills-metadata.json) or its
     // permission.skill allow-list, which matched the 30 real dirs exactly.
     linkMode: 'copy',
+    // No project-level skills either (verified: the runtime reads AGENTS.md /
+    // CLAUDE.md but no workspace skill dirs; only users/<id>/skills). Projects
+    // that pick TeleAgent contribute to its global set.
+    projectViaGlobal: true,
   },
   {
     id: 'trae',
@@ -528,7 +538,7 @@ export function projectWriteDirs(agent: AgentDef): string[] {
 
 /** Agents that can be a project target. */
 export function projectCapableAgents(): AgentDef[] {
-  return AGENTS.filter((a) => a.id !== 'universal' && a.id !== 'unknown' && projectWriteDirs(a).length > 0)
+  return AGENTS.filter((a) => a.id !== 'universal' && a.id !== 'unknown' && (projectWriteDirs(a).length > 0 || !!a.projectViaGlobal))
 }
 
 function escapeRegExp(s: string): string {

@@ -1,4 +1,6 @@
 import { useEffect, useState } from 'react'
+import { AGENT_ORDER, AGENT_META } from '../../agents'
+import { PREFERRED_IDES_CHANGED } from '../../hooks/usePreferredIdes'
 
 export function SettingsPanel() {
   const [customDir, setCustomDir] = useState('')
@@ -260,6 +262,93 @@ export function SettingsPanel() {
           </button>
         </div>
       </form>
+
+      <PreferredIdesSection />
+    </div>
+  )
+}
+
+/** Which IDEs appear in IDE pickers (project IDEs, distribution rules, batch mount). */
+function PreferredIdesSection() {
+  const [selected, setSelected] = useState<string[]>([])
+  const [isDefault, setIsDefault] = useState(true)
+  const [saving, setSaving] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+
+  useEffect(() => {
+    fetch('/api/settings')
+      .then((r) => r.json())
+      .then((d) => {
+        if (!d.ok) return
+        setSelected(d.settings.preferredIdes ?? [])
+        setIsDefault(!!d.settings.preferredIdesIsDefault)
+      })
+      .catch(() => {})
+  }, [])
+
+  const save = async (list: string[] | null) => {
+    setSaving(true)
+    setMsg(null)
+    try {
+      const res = await fetch('/api/settings/preferred-ides', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ preferredIdes: list }),
+      })
+      const d = await res.json()
+      if (d.ok) {
+        setSelected(d.ides)
+        setIsDefault(d.isDefault)
+        setMsg(list ? '已保存' : '已恢复为自动识别')
+        window.dispatchEvent(new Event(PREFERRED_IDES_CHANGED))
+      } else setMsg(d.error || '保存失败')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const all = AGENT_ORDER.filter((id) => id !== 'unknown' && id !== 'universal')
+  return (
+    <div className="border-t border-slate-800/80 pt-6 mt-6 space-y-3">
+      <div>
+        <h3 className="text-base font-semibold text-slate-100 mb-1">常用 IDE</h3>
+        <p className="text-xs text-slate-500">
+          只有这里选中的 IDE 会出现在项目 IDE、分发规则、批量挂载等选项里。
+          {isDefault ? '当前是自动识别：已有分发规则的 IDE + 项目里用到的 IDE。' : '当前是手动设置。'}
+        </p>
+      </div>
+      <div className="flex flex-wrap gap-1.5">
+        {all.map((id) => {
+          const meta = AGENT_META[id]
+          const on = selected.includes(id)
+          return (
+            <button
+              key={id}
+              type="button"
+              onClick={() => setSelected(on ? selected.filter((x) => x !== id) : [...selected, id])}
+              className={`px-2.5 py-1 rounded-full text-xs border cursor-pointer ${on ? 'border-indigo-400/60 bg-indigo-500/15 text-slate-100' : 'border-slate-800 text-slate-500 hover:text-slate-300'}`}
+            >
+              {meta?.icon} {meta?.name ?? id}
+            </button>
+          )
+        })}
+      </div>
+      <div className="flex items-center gap-3">
+        <button
+          type="button"
+          disabled={saving || selected.length === 0}
+          onClick={() => save(selected)}
+          className="px-4 py-2 bg-indigo-600 disabled:opacity-40 rounded-lg text-sm font-semibold cursor-pointer"
+        >
+          保存常用 IDE（{selected.length}）
+        </button>
+        {!isDefault && (
+          <button type="button" disabled={saving} onClick={() => save(null)} className="text-xs text-slate-400 hover:text-slate-200 cursor-pointer">
+            恢复自动识别
+          </button>
+        )}
+        {msg && <span className="text-xs text-emerald-400">{msg}</span>}
+      </div>
     </div>
   )
 }

@@ -12,6 +12,7 @@ import {
   type AgentMode,
 } from '../distribution/state.js'
 import { inspect, plan, apply, PlanChangedError, type PlanFilter } from '../distribution/reconcile.js'
+import { resolvePreferredIdes } from '../ides.js'
 
 const MODES: (AgentMode | null)[] = ['all', 'global', 'off', null]
 
@@ -60,6 +61,7 @@ export async function distributionRoutes(app: FastifyInstance) {
   // Desired state + per-agent overview.
   app.get('/api/distribution', async () => {
     const ins = await inspect()
+    const { ides: preferred } = await resolvePreferredIdes()
     const home = os.homedir()
     const agents = await Promise.all(
       distributableAgents().map(async (agent) => {
@@ -83,6 +85,8 @@ export async function distributionRoutes(app: FastifyInstance) {
           name: agent.name,
           icon: agent.icon,
           linkMode: agent.linkMode ?? 'symlink',
+          preferred: preferred.includes(agent.id),
+          fromProjects: target?.fromProjects ?? 0,
           dirs,
           exists,
           symlinkCount,

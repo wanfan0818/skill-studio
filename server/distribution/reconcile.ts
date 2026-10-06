@@ -63,6 +63,8 @@ export interface PlanAction {
   linkText?: string
   /** Set for project actions: the project root. */
   projectPath?: string
+  /** Project action carried out by global distribution (projectViaGlobal agents). */
+  viaGlobal?: boolean
 }
 
 export interface TargetSummary {
@@ -73,6 +75,8 @@ export interface TargetSummary {
   sharedWith: string[]
   mode: 'symlink' | 'copy'
   exists: boolean
+  /** Desired skills that are there only because projects need them. */
+  fromProjects?: number
   desired: number
   satisfied: number
 }
@@ -188,7 +192,30 @@ export async function listSources(warehouses: string[], warnings: string[]): Pro
   return sources
 }
 
-async function listGroups(state: DistributionState, warehouseReals: string[], warnings: string[]): Promise<Group[]> {
+/**
+ * Agents without project-level skills (projectViaGlobal, e.g. TeleAgent) get
+ * the skills of every configured project that selects them added to their
+ * global set. Returns agentId → skill → project names.
+ */
+export async function projectContributions(): Promise<Map<string, Map<string, string[]>>> {
+  const out = new Map<string, Map<string, string[]>>()
+  const viaGlobal = new Set(AGENTS.filter((a) => a.projectViaGlobal).map((a) => a.id as string))
+  if (!viaGlobal.size) return out
+  try {
+    const { listConfiguredProjects } = await import('../projects/model.js')
+    for (const p of await listConfiguredProjects()) {
+      for (const id of p.profile.ides) {
+        if (!viaGlobal.has(id)) continue
+        const m = out.get(id) ?? new Map<string, string[]>()
+        for (const skill of p.profile.skills) m.set(skill, [...(m.get(skill) ?? []), p.name])
+        out.set(id, m)
+      }
+    }
+  } catch {}
+  return out
+}
+
+async function listGroups(state: DistributionState, warehouseReals: string[], warnings: string[], alsoManaged: Set<string> = new Set()): Promise<Group[]> {
   const home = os.homedir()
   const byReal = new Map<string, Group>()
   for (const agent of AGENTS) {
@@ -197,7 +224,7 @@ async function listGroups(state: DistributionState, warehouseReals: string[], wa
       let g = byReal.get(realDir)
       if (!g) byReal.set(realDir, (g = { dir, realDir, agentIds: [], unmanaged: [], mode: 'symlink' }))
       if (agent.linkMode === 'copy') g.mode = 'copy'
-      if (state.agents[agent.id]) g.agentIds.push(agent.id)
+      if (state.agents[agent.id] || alsoManaged.has(agent.id)) g.agentIds.push(agent.id)
       else g.unmanaged.push(agent.id)
     }
   }
@@ -249,7 +276,8 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
 
   const sources = await listSources(warehouses, warnings)
   const sourceReals = new Set([...sources.values()].map((s) => s.realPath))
-  const groups = await listGroups(state, warehouseReals, warnings)
+  const contributions = await projectContributions()
+  const groups = await listGroups(state, warehouseReals, warnings, new Set(contributions.keys()))
 
   // For legacy detection: every agent global dir and every project skill dir.
   const agentDirReals = new Set<string>()
@@ -269,6 +297,15 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
   for (const g of groups) {
     const desired = new Set<string>()
     for (const id of g.agentIds) for (const n of desiredNames(state.agents[id], state, allNames)) if (sources.has(n)) desired.add(n)
+    // Skills projects need in an agent that has no project-level skills.
+    const neededBy = new Map<string, string[]>()
+    for (const id of g.agentIds) {
+      for (const [skill, projects] of contributions.get(id) ?? []) {
+        if (!sources.has(skill)) continue
+        if (!desired.has(skill)) neededBy.set(skill, projects)
+        desired.add(skill)
+      }
+    }
 
     let entries: import('fs').Dirent[] = []
     let exists = true
@@ -353,7 +390,9 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
 
     for (const name of desired) {
       if (seen.has(name)) continue
-      push({ type: copyMode ? 'copy' : 'link', name, linkPath: path.join(g.dir, name), target: sources.get(name)!.realPath, reason: copyMode ? '新增副本' : '新增' })
+      const forProjects = neededBy.get(name)
+      const why = forProjects ? `（项目「${forProjects.join('」「')}」需要）` : ''
+      push({ type: copyMode ? 'copy' : 'link', name, linkPath: path.join(g.dir, name), target: sources.get(name)!.realPath, reason: (copyMode ? '新增副本' : '新增') + why })
     }
 
     satisfied.set(g.realDir, ok)
@@ -366,6 +405,7 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
       exists,
       desired: desired.size,
       satisfied: ok.size,
+      fromProjects: neededBy.size,
     })
   }
 

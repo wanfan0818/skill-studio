@@ -13,6 +13,8 @@ import {
   fingerprintOf,
   emptyCounts,
   executeActions,
+  inspect as inspectGlobal,
+  apply as applyGlobal,
   PlanChangedError,
   type ActionType,
   type PlanAction,
@@ -81,6 +83,8 @@ interface Ctx {
   warehouseParents: Set<string>
   warehouseWarnings: string[]
   agentDirReals: Set<string>
+  /** Agents without project-level skills: their state comes from global distribution. */
+  viaGlobal: Map<string, { satisfied: Set<string>; actions: PlanAction[] }>
 }
 
 /** Expensive, project-independent inputs; build once and share across projects. */
@@ -91,7 +95,19 @@ export async function buildProjectContext(): Promise<Ctx> {
   const reals = (await Promise.all(warehouses.map((w) => realOr(w)))).filter((x): x is string => !!x)
   const agentDirReals = new Set<string>()
   for (const a of AGENTS) for (const d of agentGlobalPaths(a, os.homedir())) agentDirReals.add((await realOr(d)) ?? path.resolve(d))
-  return { warehouseSources, warehouseParents: new Set([...warehouses.map((w) => path.resolve(w)), ...reals]), warehouseWarnings, agentDirReals }
+  const viaGlobal: Ctx['viaGlobal'] = new Map()
+  const viaGlobalIds = AGENTS.filter((a) => a.projectViaGlobal).map((a) => a.id as string)
+  if (viaGlobalIds.length) {
+    const g = await inspectGlobal({ agentIds: viaGlobalIds })
+    for (const id of viaGlobalIds) {
+      const group = g.groups.find((x) => x.agentIds.includes(id))
+      viaGlobal.set(id, {
+        satisfied: group ? g.satisfied.get(group.realDir) ?? new Set() : new Set(),
+        actions: g.plan.actions.filter((a) => a.agentIds.includes(id)),
+      })
+    }
+  }
+  return { warehouseSources, warehouseParents: new Set([...warehouses.map((w) => path.resolve(w)), ...reals]), warehouseWarnings, agentDirReals, viaGlobal }
 }
 
 interface LocalSource extends SourceSkill {
@@ -357,13 +373,40 @@ export async function planProject(projectPath: string, opts: { profile?: Project
   const ideRows = ides.map((id) => {
     const agent = agentById(id)!
     const ts = [...targets.values()].filter((t) => t.agentIds.includes(id))
-    return { id, name: agent.name, icon: agent.icon, dirs: ts.map((t) => t.rel), mode: ts.some((t) => t.mode === 'copy') ? ('copy' as const) : ('symlink' as const), ts }
+    if (agent.projectViaGlobal) {
+      return { id, name: `${agent.name}（账号级）`, icon: agent.icon, dirs: ['账号级 skills 目录'], mode: 'copy' as const, ts, viaGlobal: true }
+    }
+    return { id, name: agent.name, icon: agent.icon, dirs: ts.map((t) => t.rel), mode: ts.some((t) => t.mode === 'copy') ? ('copy' as const) : ('symlink' as const), ts, viaGlobal: false }
   })
+  // Agents without project-level skills: their copies live in their global dir
+  // and are written by global distribution; surface those actions here.
+  for (const ide of ideRows.filter((r) => r.viaGlobal)) {
+    const g = ctx.viaGlobal.get(ide.id)
+    for (const name of wanted) {
+      if (local.has(name) && !ctx.warehouseSources.has(name)) {
+        warnings.push(`${ide.name} 没有项目级 Skill，只能使用仓库里的 Skill；「${name}」是项目自带的，不会同步到它`)
+        continue
+      }
+      for (const a of g?.actions ?? []) {
+        if (a.name === name && a.type !== 'unlink' && a.type !== 'legacy') actions.push({ ...a, id: `global:${a.id}`, viaGlobal: true, projectPath })
+      }
+    }
+  }
   for (const name of profile?.skills ?? []) {
     matrix[name] = {}
     for (const ide of ideRows) {
       if (!wanted.has(name)) {
         matrix[name][ide.id] = 'unavailable'
+        continue
+      }
+      if (ide.viaGlobal) {
+        const g = ctx.viaGlobal.get(ide.id)
+        matrix[name][ide.id] =
+          local.has(name) && !ctx.warehouseSources.has(name) ? 'unavailable'
+          : g?.satisfied.has(name) ? 'ok'
+          : g?.actions.some((a) => a.name === name && a.type === 'conflict') ? 'conflict'
+          : g?.actions.some((a) => a.name === name && a.type === 'update') ? 'outdated'
+          : 'pending'
         continue
       }
       let worst: CellStatus = 'ok'
@@ -381,7 +424,7 @@ export async function planProject(projectPath: string, opts: { profile?: Project
     projectPath,
     name: profile?.name ?? path.basename(projectPath),
     profile,
-    ides: ideRows.map(({ ts: _ts, ...r }) => r),
+    ides: ideRows.map(({ ts: _ts, viaGlobal: _vg, ...r }) => r),
     matrix,
     actions,
     counts,
@@ -399,6 +442,19 @@ export async function applyProject(
   const plan = await planProject(projectPath, { profile: opts.profile })
   if (opts.fingerprint && opts.fingerprint !== plan.fingerprint) throw new PlanChangedError()
   const actions = opts.skills?.length ? plan.actions.filter((a) => opts.skills!.includes(a.name)) : plan.actions
-  const result = await executeActions(actions, { includeLegacy: opts.includeLegacy })
+  const result = await executeActions(actions.filter((a) => !a.viaGlobal), { includeLegacy: opts.includeLegacy })
+  // Agents without project-level skills (TeleAgent): global distribution owns
+  // their directory — apply it for them so this project's skills land there.
+  const viaGlobalIds = (plan.profile?.ides ?? []).filter((id) => agentById(id)?.projectViaGlobal)
+  if (viaGlobalIds.length && actions.some((a) => a.viaGlobal)) {
+    // Only this project's skills — other pending TeleAgent changes stay with
+    // the distribution panel.
+    const names = [...new Set(actions.filter((a) => a.viaGlobal).map((a) => a.name))]
+    const g = await applyGlobal({ agentIds: viaGlobalIds, skills: names })
+    result.applied += g.applied
+    result.failed += g.failed
+    result.skipped += g.skipped
+    result.results.push(...g.results)
+  }
   return { ...result, plan: await planProject(projectPath) }
 }
