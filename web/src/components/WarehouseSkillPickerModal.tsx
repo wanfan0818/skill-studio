@@ -24,7 +24,10 @@ export function WarehouseSkillPickerModal({
   onToggleSkill,
 }: WarehouseSkillPickerModalProps) {
   const [searchQuery, setSearchQuery] = useState('')
-  const [filterWarehouseOnly, setFilterWarehouseOnly] = useState(false)
+  // Only warehouse skills can be synced into a project from elsewhere; skills
+  // of other projects / IDEs would show up as "找不到来源".
+  const [filterWarehouseOnly, setFilterWarehouseOnly] = useState(true)
+  const [onlyInstalled, setOnlyInstalled] = useState(false)
   const [busySkills, setBusySkills] = useState<Set<string>>(new Set())
 
   const installedSet = useMemo(() => new Set(installedSkillNames), [installedSkillNames])
@@ -40,7 +43,10 @@ export function WarehouseSkillPickerModal({
     let list = Array.from(map.values())
 
     if (filterWarehouseOnly) {
-      list = list.filter((s) => s.isWarehouseSource)
+      list = list.filter((s) => s.isWarehouseSource || installedSet.has(s.name))
+    }
+    if (onlyInstalled) {
+      list = list.filter((s) => installedSet.has(s.name))
     }
 
     if (searchQuery.trim()) {
@@ -53,14 +59,16 @@ export function WarehouseSkillPickerModal({
       )
     }
 
-    // Sort: Warehouse skills first, then alphabetical
+    // Sort: already in the project first, then warehouse skills, then alphabetical
     return list.sort((a, b) => {
+      const ia = installedSet.has(a.name), ib = installedSet.has(b.name)
+      if (ia !== ib) return ia ? -1 : 1
       if (a.isWarehouseSource !== b.isWarehouseSource) {
         return a.isWarehouseSource ? -1 : 1
       }
       return a.name.localeCompare(b.name)
     })
-  }, [allSkills, filterWarehouseOnly, searchQuery])
+  }, [allSkills, filterWarehouseOnly, onlyInstalled, searchQuery, installedSet])
 
   if (!isOpen) return null
 
@@ -80,7 +88,6 @@ export function WarehouseSkillPickerModal({
     }
   }
 
-  const isSymlinkIde = targetIde === 'claude-code' || targetIde === 'codex' || targetIde === 'cursor'
 
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/75 backdrop-blur-sm p-4 animate-in fade-in duration-200">
@@ -90,17 +97,13 @@ export function WarehouseSkillPickerModal({
           <div>
             <div className="flex items-center gap-2">
               <span className="text-xl">🏛️</span>
-              <h2 className="text-lg font-bold text-slate-100">仓库技能挑选与配置</h2>
+              <h2 className="text-lg font-bold text-slate-100">为项目添加 Skill</h2>
               <span className="px-2 py-0.5 rounded text-xs bg-slate-800 text-blue-400 font-mono">
                 {projectName}
               </span>
             </div>
             <p className="text-xs text-slate-400 mt-1">
-              部署机制: {isSymlinkIde ? (
-                <span className="text-emerald-400 font-medium">⚡ 快捷软链接 (Symlink 智能同步)</span>
-              ) : (
-                <span className="text-amber-400 font-medium">📂 实体副本 + 源标记 (兼容 Antigravity 沙盒)</span>
-              )}
+              添加的 Skill 会同步到：<span className="text-slate-200">{targetIde}</span>（点卡片上的「应用」后生效）
             </p>
           </div>
           <button
@@ -134,9 +137,15 @@ export function WarehouseSkillPickerModal({
               <span>只看仓库原件</span>
             </label>
             <span className="text-slate-600 text-xs">|</span>
-            <span className="text-xs text-slate-400">
-              已选 <strong className="text-blue-400">{installedSet.size}</strong> 个 Skill
-            </span>
+            <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
+              <input
+                type="checkbox"
+                checked={onlyInstalled}
+                onChange={(e) => setOnlyInstalled(e.target.checked)}
+                className="rounded border-slate-700 bg-slate-950 text-blue-500 focus:ring-0"
+              />
+              <span>只看已在项目中（<strong className="text-blue-400">{installedSet.size}</strong>）</span>
+            </label>
           </div>
         </div>
 
@@ -194,7 +203,7 @@ export function WarehouseSkillPickerModal({
                         <span className="animate-spin text-xs">⏳</span>
                       ) : isInstalled ? (
                         <>
-                          <span>✓ 已配置</span>
+                          <span>✓ 已在项目中</span>
                           <span className="text-[10px] opacity-60">点击移除</span>
                         </>
                       ) : (

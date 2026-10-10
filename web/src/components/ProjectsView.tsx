@@ -1,29 +1,70 @@
-import { useEffect, useState, useCallback } from 'react'
-import { getAgentMeta } from '../agents'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { ProjectWizard } from './ProjectWizard'
 import { WarehouseSkillPickerModal } from './WarehouseSkillPickerModal'
-import { ProjectManageModal } from './ProjectManageModal'
 import { DeleteProjectModal } from './DeleteProjectModal'
 import type { Skill } from '../hooks/useSkills'
+import { PREFERRED_IDES_CHANGED } from '../hooks/usePreferredIdes'
 
-interface SkillProfile {
-  version: number
+type CellStatus = 'ok' | 'pending' | 'outdated' | 'conflict' | 'unavailable' | 'local'
+type ActionType = 'link' | 'relink' | 'copy' | 'update' | 'unlink' | 'legacy' | 'conflict'
+
+interface IdeInfo {
+  id: string
+  name: string
+  icon: string
+  writeDirs: string[]
+  mode: 'symlink' | 'copy'
+  /** No project-level skills (TeleAgent): uses its account-level set. */
+  viaGlobal?: boolean
+}
+
+interface ProjectProfile {
   name: string
   description: string
   skills: string[]
-  targetIde: string
-  createdAt: string
-  updatedAt: string
+  ides: string[]
 }
 
-interface ProjectWithProfile {
+interface ProjectRow {
   name: string
   path: string
-  skillCount: number
-  profile?: SkillProfile
-  linkedSkillCount: number
-  profileSkillCount: number
-  syncStatus: 'synced' | 'drift' | 'no-profile'
+  profile: ProjectProfile
+  ides: { id: string; name: string; icon: string; dirs: string[]; mode: 'symlink' | 'copy' }[]
+  matrix: Record<string, Record<string, CellStatus>>
+  counts: Record<ActionType, number>
+  pending: number
+  strayDirs: { rel: string; readBy: string[]; managed: number; real: number }[]
+  inventory: InventoryItem[]
+  warnings: string[]
+  fingerprint: string
+}
+
+interface InventoryItem {
+  name: string
+  description: string
+  inList: boolean
+  source: 'local' | 'warehouse' | 'missing'
+  localRel?: string
+  foundIn: string[]
+  untrackedKind?: 'local' | 'leftover'
+}
+
+interface Candidate {
+  name: string
+  path: string
+  dirs: { rel: string; entries: number; readBy: string[] }[]
+  suggestedIdes: string[]
+  skills: string[]
+  autoProfile: boolean
+}
+
+const CELL: Record<CellStatus, { icon: string; cls: string; label: string }> = {
+  ok: { icon: '✓', cls: 'text-emerald-400', label: '已就绪' },
+  local: { icon: '⌂', cls: 'text-emerald-300', label: '项目自带' },
+  pending: { icon: '○', cls: 'text-amber-400', label: '待同步' },
+  outdated: { icon: '↻', cls: 'text-sky-400', label: '副本待更新' },
+  conflict: { icon: '!', cls: 'text-red-400', label: '冲突（未覆盖）' },
+  unavailable: { icon: '–', cls: 'text-slate-500', label: '找不到来源' },
 }
 
 interface ProjectsViewProps {
@@ -31,664 +72,543 @@ interface ProjectsViewProps {
   onRefreshSkills: () => void
 }
 
+async function postJson(url: string, body: unknown) {
+  const res = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+  return { status: res.status, data: await res.json().catch(() => ({})) }
+}
+
 export function ProjectsView({ allSkills, onRefreshSkills }: ProjectsViewProps) {
-  const [projects, setProjects] = useState<ProjectWithProfile[]>([])
+  const [projects, setProjects] = useState<ProjectRow[]>([])
+  const [candidates, setCandidates] = useState<Candidate[]>([])
+  const [ideCatalog, setIdeCatalog] = useState<IdeInfo[]>([])
+  const [excluded, setExcluded] = useState<string[]>([])
   const [loading, setLoading] = useState(true)
-  const [error, setError] = useState<string | null>(null)
-  
-  // 向导模态框状态
+  const [expanded, setExpanded] = useState<string | null>(null)
+  const [busy, setBusy] = useState<string | null>(null)
+  const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
+  const [cleanup, setCleanup] = useState<Record<string, boolean>>({})
+  const [showCandidates, setShowCandidates] = useState(false)
+  const [candidateIdes, setCandidateIdes] = useState<Record<string, string[]>>({})
   const [wizardOpen, setWizardOpen] = useState(false)
-  const [wizardEditingProject, setWizardEditingProject] = useState<ProjectWithProfile | null>(null)
+  const [pickerProject, setPickerProject] = useState<ProjectRow | null>(null)
+  const [deleteTarget, setDeleteTarget] = useState<{ name: string; path: string } | null>(null)
 
-  // 专属项目管理控制台模态框状态
-  const [manageProject, setManageProject] = useState<ProjectWithProfile | null>(null)
-
-  // 仓库技能挑选弹窗状态
-  const [pickerProject, setPickerProject] = useState<ProjectWithProfile | null>(null)
-  
-  // 删除确认模态框状态
-  const [deleteModalTarget, setDeleteModalTarget] = useState<{ name: string; path: string } | null>(null)
-
-  // 已排除/隐藏项目状态
-  const [excludedProjects, setExcludedProjects] = useState<string[]>([])
-  const [showExcludedPanel, setShowExcludedPanel] = useState(false)
-
-  // 操作忙碌状态
-  const [busyPaths, setBusyPaths] = useState<Set<string>>(new Set())
-  const [message, setMessage] = useState<{ kind: 'info' | 'error' | 'success'; text: string } | null>(null)
-
-  const fetchExcludedProjects = useCallback(async () => {
-    try {
-      const res = await fetch('/api/projects/excluded')
-      const data = await res.json()
-      if (data.ok) {
-        setExcludedProjects(data.excludedProjects || [])
-      }
-    } catch {}
-  }, [])
-
-  const fetchProjects = useCallback(async () => {
+  const refresh = useCallback(async () => {
     setLoading(true)
-    setError(null)
     try {
-      const res = await fetch('/api/projects')
-      const data = await res.json()
-      if (data.ok) {
-        setProjects(data.projects || [])
-      } else {
-        setError(data.error || '获取项目列表失败')
+      const [p, c, i, e] = await Promise.all([
+        fetch('/api/projects').then((r) => r.json()),
+        fetch('/api/projects/candidates').then((r) => r.json()),
+        fetch('/api/projects/ides').then((r) => r.json()),
+        fetch('/api/projects/excluded').then((r) => r.json()),
+      ])
+      if (p.ok) setProjects(p.projects)
+      if (c.ok) {
+        setCandidates(c.candidates)
+        setCandidateIdes((prev) => {
+          const next = { ...prev }
+          for (const cand of c.candidates as Candidate[]) next[cand.path] ??= cand.suggestedIdes
+          return next
+        })
       }
-      await fetchExcludedProjects()
+      if (i.ok) setIdeCatalog(i.ides)
+      if (e.ok) setExcluded(e.excludedProjects)
     } catch (err: any) {
-      setError(err?.message || '网络请求错误，无法获取项目列表')
+      setNotice({ kind: 'err', text: '读取项目失败：' + err.message })
     } finally {
       setLoading(false)
     }
-  }, [fetchExcludedProjects])
+  }, [])
 
   useEffect(() => {
-    fetchProjects()
-  }, [fetchProjects])
+    refresh()
+    window.addEventListener(PREFERRED_IDES_CHANGED, refresh)
+    return () => window.removeEventListener(PREFERRED_IDES_CHANGED, refresh)
+  }, [refresh])
 
-  // 清除通知消息
-  useEffect(() => {
-    if (message) {
-      const timer = setTimeout(() => setMessage(null), 5000)
-      return () => clearTimeout(timer)
-    }
-  }, [message])
-
-  const setPathBusy = (projectPath: string, busy: boolean) => {
-    setBusyPaths(prev => {
-      const next = new Set(prev)
-      if (busy) {
-        next.add(projectPath)
-      } else {
-        next.delete(projectPath)
-      }
-      return next
-    })
+  const afterChange = async (text?: string, kind: 'ok' | 'err' = 'ok') => {
+    if (text) setNotice({ kind, text })
+    await refresh()
+    onRefreshSkills()
   }
 
-  // 同步操作
-  const handleSync = async (projectPath: string) => {
-    setPathBusy(projectPath, true)
-    setMessage(null)
+  const saveProfile = async (p: ProjectRow, patch: Partial<ProjectProfile>) => {
+    setBusy(p.path)
     try {
-      const res = await fetch('/api/projects/sync', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectPath })
-      })
-      const data = await res.json()
-      if (data.ok) {
-        setMessage({ kind: 'success', text: '项目 Skill 同步成功！' })
-        fetchProjects()
-        onRefreshSkills() // 刷新全局缓存，同步缓存
-      } else {
-        setMessage({ kind: 'error', text: `同步失败: ${data.error}` })
-      }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `同步出错: ${err.message}` })
+      const { data } = await postJson('/api/projects/profile', { projectPath: p.path, profile: { ...p.profile, ...patch } })
+      if (!data.ok) setNotice({ kind: 'err', text: data.error || '保存失败' })
+      await refresh() // profile edits only change the plan; nothing is applied yet
     } finally {
-      setPathBusy(projectPath, false)
+      setBusy(null)
     }
   }
 
-  // 清理操作
-  const handleClean = async (projectPath: string) => {
-    if (!confirm('确定要清理该项目下的所有 Skill 软链接并删除配置文件吗？此操作不会删除全局已有的 Skill 真实文件。')) {
-      return
-    }
-    setPathBusy(projectPath, true)
-    setMessage(null)
+  const applyProject = async (p: ProjectRow) => {
+    setBusy(p.path)
     try {
-      const res = await fetch('/api/projects/clean', {
-        method: 'DELETE',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectPath })
+      const { status, data } = await postJson('/api/projects/apply', {
+        projectPath: p.path,
+        fingerprint: p.fingerprint,
+        includeLegacy: !!cleanup[p.path],
       })
-      const data = await res.json()
-      if (data.ok) {
-        setMessage({ kind: 'success', text: '已清除该项目的 Skill 配置与软链接' })
-        fetchProjects()
-        onRefreshSkills()
+      if (status === 409) await afterChange('磁盘状态已变化，已刷新预览，请确认后再应用。', 'err')
+      else if (data.ok) {
+        setCleanup((c) => ({ ...c, [p.path]: false }))
+        await afterChange(`「${p.name}」已应用 ${data.applied} 项变更`)
       } else {
-        setMessage({ kind: 'error', text: `清理失败: ${data.error}` })
+        const first = (data.results || []).find((r: any) => !r.ok)
+        await afterChange(`应用 ${data.applied ?? 0} 项，失败 ${data.failed ?? '?'} 项${first ? '：' + first.error : ''}`, 'err')
       }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `清理出错: ${err.message}` })
     } finally {
-      setPathBusy(projectPath, false)
+      setBusy(null)
     }
   }
 
-  const openWizardForCreate = () => {
-    setWizardEditingProject(null)
-    setWizardOpen(true)
-  }
-
-  const openWizardForEdit = (project: ProjectWithProfile) => {
-    setWizardEditingProject(project)
-    setWizardOpen(true)
-  }
-
-  const handleWizardClose = (shouldRefresh: boolean) => {
-    setWizardOpen(false)
-    setWizardEditingProject(null)
-    if (shouldRefresh) {
-      fetchProjects()
-      onRefreshSkills()
-    }
-  }
-
-  // 单技能切换绑定处理
-  const handleTogglePickerSkill = async (skillName: string, currentlyInstalled: boolean) => {
-    if (!pickerProject) return
-    const endpoint = currentlyInstalled ? '/api/projects/uninstall-skill' : '/api/projects/install-skill'
+  const importCandidate = async (c: Candidate) => {
+    setBusy(c.path)
     try {
-      const res = await fetch(endpoint, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectPath: pickerProject.path,
-          skillName,
-          targetIde: pickerProject.profile?.targetIde || 'claude-code',
-        }),
-      })
-      const data = await res.json()
+      const { data } = await postJson('/api/projects/import', { projectPath: c.path, ides: candidateIdes[c.path] ?? c.suggestedIdes })
       if (data.ok) {
-        // 本地更新 pickerProject state
-        setProjects((prev) =>
-          prev.map((p) => {
-            if (p.path === pickerProject.path && p.profile) {
-              const currentSkills = p.profile.skills || []
-              const nextSkills = currentlyInstalled
-                ? currentSkills.filter((s) => s !== skillName)
-                : [...currentSkills, skillName]
-              return {
-                ...p,
-                profile: { ...p.profile, skills: nextSkills },
-                profileSkillCount: nextSkills.length,
-              }
-            }
-            return p
-          })
-        )
-        setPickerProject((prev) => {
-          if (!prev || !prev.profile) return prev
-          const currentSkills = prev.profile.skills || []
-          const nextSkills = currentlyInstalled
-            ? currentSkills.filter((s) => s !== skillName)
-            : [...currentSkills, skillName]
-          return {
-            ...prev,
-            profile: { ...prev.profile, skills: nextSkills },
-            profileSkillCount: nextSkills.length,
-          }
-        })
-        onRefreshSkills()
-      } else {
-        setMessage({ kind: 'error', text: `配置 Skill 失败: ${data.error}` })
-      }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `请求出错: ${err.message}` })
-    }
-  }
-
-  const handleUninstallSkill = async (projectPath: string, skillName: string) => {
-    try {
-      const res = await fetch('/api/projects/uninstall-skill', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectPath, skillName }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        setProjects((prev) =>
-          prev.map((p) => {
-            if (p.path === projectPath && p.profile) {
-              const nextSkills = (p.profile.skills || []).filter((s) => s !== skillName)
-              return { ...p, profile: { ...p.profile, skills: nextSkills }, profileSkillCount: nextSkills.length }
-            }
-            return p
-          })
-        )
-        setManageProject((prev) => {
-          if (!prev || prev.path !== projectPath || !prev.profile) return prev
-          const nextSkills = (prev.profile.skills || []).filter((s) => s !== skillName)
-          return { ...prev, profile: { ...prev.profile, skills: nextSkills }, profileSkillCount: nextSkills.length }
-        })
-        onRefreshSkills()
-      } else {
-        setMessage({ kind: 'error', text: `解绑失败: ${data.error}` })
-      }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `解绑出错: ${err.message}` })
-    }
-  }
-
-  const handleChangeIde = async (projectPath: string, newTargetIde: string) => {
-    try {
-      const targetProj = projects.find((p) => p.path === projectPath)
-      const currentSkills = targetProj?.profile?.skills || []
-      const currentDesc = targetProj?.profile?.description || '项目配置'
-
-      const res = await fetch('/api/projects/profile', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          projectPath,
-          targetIde: newTargetIde,
-          skills: currentSkills,
-          description: currentDesc,
-        }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        setProjects((prev) =>
-          prev.map((p) => {
-            if (p.path === projectPath && p.profile) {
-              return { ...p, profile: { ...p.profile, targetIde: newTargetIde } }
-            }
-            return p
-          })
-        )
-        setManageProject((prev) => {
-          if (!prev || prev.path !== projectPath || !prev.profile) return prev
-          return { ...prev, profile: { ...prev.profile, targetIde: newTargetIde } }
-        })
-        onRefreshSkills()
-      }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `更改 IDE 出错: ${err.message}` })
-    }
-  }
-
-  // 确定删除/隐藏项目
-  const handleConfirmDeleteProject = async (purgeFiles: boolean) => {
-    if (!deleteModalTarget) return
-    const { path: projectPath, name: projectName } = deleteModalTarget
-    setPathBusy(projectPath, true)
-    try {
-      const res = await fetch('/api/projects/delete', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectPath, purgeFiles }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        setMessage({
-          kind: 'success',
-          text: `项目「${projectName}」已从列表中移除${purgeFiles ? ' (配置与技能目录已物理删除)' : ''}`,
-        })
-        await fetchProjects()
-        onRefreshSkills()
-      } else {
-        setMessage({ kind: 'error', text: `删除项目失败: ${data.error}` })
-      }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `删除项目出错: ${err.message}` })
+        setExpanded(c.path)
+        await afterChange(`已导入「${c.name}」，请预览后应用`)
+      } else setNotice({ kind: 'err', text: data.error || '导入失败' })
     } finally {
-      setPathBusy(projectPath, false)
-      setDeleteModalTarget(null)
+      setBusy(null)
     }
   }
 
-  // 恢复显示项目
-  const handleRestoreProject = async (projectPath: string) => {
-    setPathBusy(projectPath, true)
-    try {
-      const res = await fetch('/api/projects/restore', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ projectPath }),
-      })
-      const data = await res.json()
-      if (data.ok) {
-        setMessage({ kind: 'success', text: '项目已恢复显示并纳入扫描' })
-        await fetchProjects()
-        onRefreshSkills()
-      } else {
-        setMessage({ kind: 'error', text: `恢复项目失败: ${data.error}` })
-      }
-    } catch (err: any) {
-      setMessage({ kind: 'error', text: `恢复项目出错: ${err.message}` })
-    } finally {
-      setPathBusy(projectPath, false)
-    }
+  const hideProject = async (projectPath: string, purgeFiles = false) => {
+    const { data } = await postJson('/api/projects/delete', { projectPath, purgeFiles })
+    if (data.ok) await afterChange(purgeFiles ? '项目已移除，Skill 目录已清理（真实目录进回收站）' : '已从列表中移除')
+    else setNotice({ kind: 'err', text: data.error || '操作失败' })
   }
+
+  const ideName = (id: string) => ideCatalog.find((i) => i.id === id)?.name ?? id
 
   return (
-    <div className="flex-1 flex flex-col h-full overflow-hidden bg-slate-950/40 text-slate-100">
-      {/* 顶部标题栏 */}
-      <div className="flex items-center justify-between px-8 py-6 border-b border-slate-800/60 bg-slate-900/20 backdrop-blur-md">
+    <div className="max-w-5xl mx-auto space-y-5">
+      <div className="flex items-start justify-between gap-4 flex-wrap">
         <div>
-          <h1 className="text-2xl font-bold tracking-tight text-white flex items-center gap-2">
-            <span>📁</span> 项目 Skill 管理
-          </h1>
-          <p className="text-sm text-slate-400 mt-1">
-            将全局 Skill 按需软链接到指定项目中，有效降低大模型 Token 消耗并提速
+          <h2 className="text-xl font-bold text-slate-100">项目</h2>
+          <p className="text-sm text-slate-500 mt-1">
+            一个项目 = 一个文件夹：一套 Skill，同步到你在这个项目里用的每一个 IDE。修改不会立即写盘，预览后点「应用」。
           </p>
         </div>
-        <div className="flex items-center gap-3">
-          {excludedProjects.length > 0 && (
-            <button
-              onClick={() => setShowExcludedPanel(!showExcludedPanel)}
-              className="px-3 py-2 text-xs font-medium text-slate-300 hover:text-white bg-slate-800/80 hover:bg-slate-700 rounded-lg border border-slate-700/60 transition flex items-center gap-1.5"
-            >
-              <span>🙈</span>
-              <span>已隐藏的项目 ({excludedProjects.length})</span>
-            </button>
-          )}
-
-          <button
-            onClick={openWizardForCreate}
-            className="px-4 py-2 text-sm font-medium text-white bg-blue-600 hover:bg-blue-500 rounded-lg shadow-lg shadow-blue-500/20 active:scale-95 transition flex items-center gap-2"
-          >
-            <span>＋</span> 新增项目配置
-          </button>
-        </div>
+        <button onClick={() => setWizardOpen(true)} className="px-3 py-1.5 bg-indigo-600 text-xs font-semibold rounded-lg cursor-pointer">
+          + 新建项目
+        </button>
       </div>
 
-      {/* 已排除/隐藏项目面板 */}
-      {showExcludedPanel && excludedProjects.length > 0 && (
-        <div className="px-8 pt-4">
-          <div className="p-4 bg-slate-900/60 rounded-xl border border-slate-800 space-y-3">
-            <div className="flex items-center justify-between">
-              <div className="flex items-center gap-2">
-                <span className="text-sm">🙈</span>
-                <h3 className="text-xs font-bold text-slate-200">已隐藏/排除的项目清单 ({excludedProjects.length})</h3>
+      {notice && (
+        <div className={`text-xs px-3 py-2 rounded-lg flex justify-between ${notice.kind === 'ok' ? 'bg-emerald-500/10 text-emerald-300' : 'bg-rose-500/10 text-rose-300'}`}>
+          <span>{notice.text}</span>
+          <button onClick={() => setNotice(null)} className="cursor-pointer">✕</button>
+        </div>
+      )}
+
+      {loading && projects.length === 0 ? (
+        <div className="flex justify-center py-16">
+          <div className="w-8 h-8 border-2 border-slate-600 border-t-white rounded-full animate-spin" />
+        </div>
+      ) : projects.length === 0 ? (
+        <div className="border border-dashed border-slate-800 rounded-xl p-8 text-center text-sm text-slate-500">
+          还没有配置过的项目。新建一个，或从下方「发现的候选项目」导入。
+        </div>
+      ) : (
+        <div className="space-y-3">
+          {projects.map((p) => (
+            <ProjectCard
+              key={p.path}
+              project={p}
+              ideCatalog={ideCatalog}
+              expanded={expanded === p.path}
+              busy={busy === p.path}
+              cleanup={!!cleanup[p.path]}
+              onToggleExpand={() => setExpanded(expanded === p.path ? null : p.path)}
+              onSetIdes={(ides) => saveProfile(p, { ides })}
+              onRemoveSkill={(name) => saveProfile(p, { skills: p.profile.skills.filter((s) => s !== name) })}
+              onAddSkills={(names) => saveProfile(p, { skills: [...p.profile.skills, ...names.filter((n) => !p.profile.skills.includes(n))] })}
+              onPickSkills={() => setPickerProject(p)}
+              onCleanup={(v) => setCleanup((c) => ({ ...c, [p.path]: v }))}
+              onApply={() => applyProject(p)}
+              onDelete={() => setDeleteTarget({ name: p.name, path: p.path })}
+              ideName={ideName}
+            />
+          ))}
+        </div>
+      )}
+
+      {/* Candidates */}
+      <div className="border border-slate-800/80 rounded-xl">
+        <button onClick={() => setShowCandidates((v) => !v)} className="w-full px-4 py-3 flex justify-between items-center text-sm cursor-pointer">
+          <span className="font-semibold text-slate-300">
+            发现的候选项目 <span className="text-slate-500 font-normal">（{candidates.length}，未配置，不会被管理）</span>
+          </span>
+          <span className="text-slate-500">{showCandidates ? '收起' : '展开'}</span>
+        </button>
+        {showCandidates && (
+          <div className="border-t border-slate-800/80 divide-y divide-slate-800/60">
+            {candidates.length === 0 && <div className="px-4 py-4 text-xs text-slate-500">没有候选项目。</div>}
+            {candidates.map((c) => (
+              <div key={c.path} className="px-4 py-3 space-y-2">
+                <div className="flex justify-between gap-3 flex-wrap">
+                  <div className="min-w-0">
+                    <div className="text-sm text-slate-200 font-medium">
+                      {c.name}
+                      {c.autoProfile && <span className="ml-2 text-[10px] text-amber-400/80">旧版本自动生成的配置，未确认</span>}
+                    </div>
+                    <div className="text-[11px] text-slate-500 truncate" title={c.path}>{c.path}</div>
+                    <div className="text-[11px] text-slate-500 mt-1">
+                      {c.dirs.map((d) => `${d.rel}（${d.entries}）`).join('、') || '无 Skill 目录'} · {c.skills.length} 个 Skill
+                    </div>
+                  </div>
+                  <div className="flex gap-2 shrink-0 items-start">
+                    <button disabled={busy === c.path} onClick={() => importCandidate(c)} className="px-3 py-1 text-xs rounded bg-indigo-600 disabled:opacity-40 cursor-pointer">
+                      导入为项目
+                    </button>
+                    <button onClick={() => hideProject(c.path)} className="px-3 py-1 text-xs rounded bg-slate-800 text-slate-400 cursor-pointer">
+                      忽略
+                    </button>
+                  </div>
+                </div>
+                <IdePicker
+                  catalog={ideCatalog}
+                  selected={candidateIdes[c.path] ?? c.suggestedIdes}
+                  onChange={(ides) => setCandidateIdes((m) => ({ ...m, [c.path]: ides }))}
+                  hint="导入后同步到："
+                />
               </div>
-              <span className="text-[11px] text-slate-400">这些项目全盘扫描时将被自动跳过</span>
-            </div>
-
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-2 max-h-48 overflow-y-auto pr-1">
-              {excludedProjects.map((pPath) => (
-                <div key={pPath} className="p-2.5 bg-slate-950/80 rounded-lg border border-slate-800/80 flex items-center justify-between gap-3 text-xs">
-                  <div className="min-w-0 flex-1 font-mono text-slate-400 truncate" title={pPath}>
-                    {pPath}
-                  </div>
-                  <button
-                    onClick={() => handleRestoreProject(pPath)}
-                    className="px-2.5 py-1 text-[11px] font-medium bg-emerald-500/10 hover:bg-emerald-500/20 text-emerald-400 border border-emerald-500/30 rounded transition shrink-0 flex items-center gap-1"
-                  >
-                    <span>🔄</span>
-                    <span>恢复显示</span>
-                  </button>
-                </div>
-              ))}
-            </div>
-          </div>
-        </div>
-      )}
-
-      {/* 消息通知区 */}
-      {message && (
-        <div className="px-8 pt-4">
-          <div className={`px-4 py-3 rounded-lg flex items-center justify-between text-sm backdrop-blur-sm ${
-            message.kind === 'success' ? 'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20' :
-            message.kind === 'error' ? 'bg-rose-500/10 text-rose-300 border border-rose-500/20' :
-            'bg-blue-500/10 text-blue-300 border border-blue-500/20'
-          }`}>
-            <div className="flex items-center gap-2">
-              <span>{message.kind === 'success' ? '✨' : message.kind === 'error' ? '🚨' : 'ℹ️'}</span>
-              <span>{message.text}</span>
-            </div>
-            <button onClick={() => setMessage(null)} className="text-slate-400 hover:text-white transition">×</button>
-          </div>
-        </div>
-      )}
-
-      {/* 项目卡片列表 */}
-      <div className="flex-1 overflow-y-auto px-8 py-6">
-        {loading ? (
-          <div className="flex flex-col items-center justify-center h-64 gap-3">
-            <div className="w-8 h-8 border-2 border-blue-500 border-t-transparent rounded-full animate-spin"></div>
-            <p className="text-sm text-slate-400">正在扫描并加载项目...</p>
-          </div>
-        ) : error ? (
-          <div className="flex flex-col items-center justify-center h-64 bg-slate-900/30 rounded-xl border border-rose-500/10 p-6">
-            <span className="text-3xl">⚠️</span>
-            <h3 className="text-lg font-medium text-rose-300 mt-2">载入项目出错</h3>
-            <p className="text-sm text-slate-400 mt-1">{error}</p>
-            <button onClick={fetchProjects} className="mt-4 px-4 py-1.5 text-xs text-white bg-slate-800 hover:bg-slate-700 rounded-md transition">
-              重试
-            </button>
-          </div>
-        ) : projects.length === 0 ? (
-          <div className="flex flex-col items-center justify-center h-80 bg-slate-900/10 rounded-2xl border border-dashed border-slate-800 p-8 text-center">
-            <span className="text-4xl text-slate-600 mb-3">📂</span>
-            <h3 className="text-lg font-medium text-slate-300">暂无项目</h3>
-            <p className="text-sm text-slate-500 max-w-sm mt-1 mb-6">
-              未扫描到包含 Skill 目录的项目，或者您还没有为项目创建过 `.skills-profile.json` 配置文件。
-            </p>
-            <button
-              onClick={openWizardForCreate}
-              className="px-4 py-2 text-sm text-white bg-blue-600 hover:bg-blue-500 rounded-lg transition"
-            >
-              配置您的第一个项目
-            </button>
-          </div>
-        ) : (
-          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
-            {projects.map((proj) => {
-              const profile = proj.profile
-              const agentMeta = profile ? getAgentMeta(profile.targetIde) : null
-              const isBusy = busyPaths.has(proj.path)
-
-              return (
-                <div
-                  key={proj.path}
-                  className={`relative flex flex-col justify-between rounded-xl bg-slate-900/40 border transition duration-300 hover:border-slate-700/60 hover:bg-slate-900/60 group overflow-hidden ${
-                    proj.syncStatus === 'drift' ? 'border-amber-500/20' :
-                    proj.syncStatus === 'synced' ? 'border-emerald-500/20' :
-                    'border-slate-800/80'
-                  }`}
-                >
-                  {/* 同步状态的顶部发光条 */}
-                  <div className={`absolute top-0 left-0 right-0 h-1 transition-opacity ${
-                    proj.syncStatus === 'drift' ? 'bg-gradient-to-r from-amber-500/80 to-amber-600/80' :
-                    proj.syncStatus === 'synced' ? 'bg-gradient-to-r from-emerald-500/80 to-emerald-600/80' :
-                    'bg-slate-800'
-                  }`} />
-
-                  {/* 卡片头部 */}
-                  <div className="p-5 flex-1">
-                    <div className="flex items-start justify-between gap-3 mb-2">
-                      <h3 className="font-semibold text-white text-base truncate" title={proj.name}>
-                        {proj.name}
-                      </h3>
-                      {/* 同步徽章 */}
-                      {proj.syncStatus === 'synced' && (
-                        <span className="px-2 py-0.5 text-xs font-medium bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 rounded">
-                          已同步
-                        </span>
-                      )}
-                      {proj.syncStatus === 'drift' && (
-                        <span className="px-2 py-0.5 text-xs font-medium bg-amber-500/10 text-amber-400 border border-amber-500/20 rounded animate-pulse">
-                          待同步
-                        </span>
-                      )}
-                      {proj.syncStatus === 'no-profile' && (
-                        <span className="px-2 py-0.5 text-xs font-medium bg-slate-800 text-slate-400 border border-slate-700 rounded">
-                          未配置
-                        </span>
-                      )}
-                    </div>
-
-                    {/* 项目路径 */}
-                    <p className="text-xs text-slate-500 font-mono break-all line-clamp-1 mb-4" title={proj.path}>
-                      {proj.path}
-                    </p>
-
-                    {/* 项目描述（若有配置） */}
-                    {profile?.description ? (
-                      <p className="text-xs text-slate-400 line-clamp-2 min-h-[2rem] mb-4 bg-slate-950/20 p-2 rounded border border-slate-800/40">
-                        {profile.description}
-                      </p>
-                    ) : (
-                      <p className="text-xs text-slate-600 italic min-h-[2rem] mb-4 flex items-center">
-                        暂无项目描述，点击下方管理按钮进入操控台。
-                      </p>
-                    )}
-
-                    {/* 信息行：包含的 IDE 和 Skill 数量 */}
-                    <div className="flex items-center justify-between text-xs text-slate-400 mt-2">
-                      {/* IDE 图标标签 */}
-                      {agentMeta ? (
-                        <div className={`flex items-center gap-1.5 px-2 py-1 rounded-md border ${agentMeta.color.bg} ${agentMeta.color.text} ${agentMeta.color.ring.replace('ring', 'border')}`}>
-                          <span>{agentMeta.icon}</span>
-                          <span className="font-medium">{agentMeta.name}</span>
-                        </div>
-                      ) : (
-                        <div className="flex items-center gap-1 px-2 py-1 rounded bg-slate-800 text-slate-400 border border-slate-700">
-                          <span>🌐</span>
-                          <span>未选 IDE</span>
-                        </div>
-                      )}
-
-                      {/* 数量统计 */}
-                      <div className="flex items-center gap-1 text-slate-300">
-                        <span>🧩</span>
-                        <span>
-                          {proj.syncStatus === 'no-profile'
-                            ? `${proj.linkedSkillCount} 个软链`
-                            : `${proj.linkedSkillCount} / ${proj.profileSkillCount} Skills`}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-
-                  {/* 卡片底部操作栏 */}
-                  <div className="px-5 py-3.5 bg-slate-900/30 border-t border-slate-800/40 flex items-center justify-between gap-2 flex-wrap">
-                    <div className="flex items-center gap-2">
-                      <button
-                        disabled={isBusy}
-                        onClick={() => setPickerProject(proj)}
-                        className="text-xs font-semibold text-blue-400 hover:text-blue-300 px-2.5 py-1.5 rounded hover:bg-blue-500/10 border border-blue-500/30 transition flex items-center gap-1"
-                        title="打开仓库技能选择器，快捷配置此项目的技能"
-                      >
-                        <span>🏛️</span>
-                        <span>挑技能</span>
-                      </button>
-
-                      <button
-                        disabled={isBusy}
-                        onClick={() => {
-                          if (profile) {
-                            setManageProject(proj)
-                          } else {
-                            openWizardForEdit(proj)
-                          }
-                        }}
-                        className="text-xs font-medium text-slate-300 hover:text-white px-2.5 py-1.5 rounded hover:bg-slate-800 border border-slate-800 hover:border-slate-700 transition"
-                      >
-                        {profile ? '⚙️ 管理操控台' : '配置项目'}
-                      </button>
-                    </div>
-
-                    <div className="flex items-center gap-2">
-                      {profile && (
-                        <button
-                          disabled={isBusy}
-                          onClick={() => handleClean(proj.path)}
-                          className="text-xs font-medium text-slate-500 hover:text-amber-400 px-2 py-1 rounded hover:bg-amber-500/5 transition"
-                          title="清理项目下的所有软链接并删除项目配置文件"
-                        >
-                          清理
-                        </button>
-                      )}
-
-                      <button
-                        disabled={isBusy}
-                        onClick={() => setDeleteModalTarget({ name: proj.name, path: proj.path })}
-                        className="text-xs font-medium text-slate-500 hover:text-rose-400 px-1.5 py-1 rounded hover:bg-rose-500/10 transition"
-                        title="从 Skill Studio 中隐藏或彻底删除此项目"
-                      >
-                        🗑️
-                      </button>
-
-                      {profile && (
-                        <button
-                          disabled={isBusy || (proj.syncStatus === 'synced' && proj.linkedSkillCount === proj.profileSkillCount)}
-                          onClick={() => handleSync(proj.path)}
-                          className={`text-xs font-medium px-3 py-1.5 rounded transition active:scale-95 flex items-center gap-1.5 ${
-                            proj.syncStatus === 'drift'
-                              ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-lg shadow-amber-500/10'
-                              : 'bg-slate-800 hover:bg-slate-700 text-slate-200'
-                          }`}
-                        >
-                          {isBusy ? (
-                            <span className="w-3.5 h-3.5 border-2 border-current border-t-transparent rounded-full animate-spin" />
-                          ) : (
-                            <span>🔄</span>
-                          )}
-                          <span>{proj.syncStatus === 'synced' ? '重新同步' : '同步'}</span>
-                        </button>
-                      )}
-                    </div>
-                  </div>
-                </div>
-              )
-            })}
+            ))}
           </div>
         )}
       </div>
 
-      {/* 专属项目集中操控台模态框 */}
-      {manageProject && (
-        <ProjectManageModal
-          isOpen={!!manageProject}
-          onClose={() => setManageProject(null)}
-          project={manageProject}
-          allSkills={allSkills || []}
-          onUninstallSkill={handleUninstallSkill}
-          onChangeIde={handleChangeIde}
-          onOpenWarehousePicker={() => {
-            setPickerProject(manageProject)
-          }}
-          onSyncProject={async (path) => {
-            await handleSync(path)
-          }}
-          onDeleteProject={(projectPath, projectName) => {
-            setDeleteModalTarget({ name: projectName, path: projectPath })
-          }}
-        />
+      {excluded.length > 0 && (
+        <div className="text-[11px] text-slate-500">
+          已忽略 {excluded.length} 个文件夹：
+          {excluded.map((e) => (
+            <button key={e} onClick={async () => { await postJson('/api/projects/restore', { projectPath: e }); await refresh() }} className="ml-2 underline hover:text-slate-300 cursor-pointer" title="恢复">
+              {e.split('/').pop()}
+            </button>
+          ))}
+        </div>
       )}
 
-      {/* 删除确认模态框 */}
-      {deleteModalTarget && (
-        <DeleteProjectModal
-          isOpen={!!deleteModalTarget}
-          projectName={deleteModalTarget.name}
-          projectPath={deleteModalTarget.path}
-          onClose={() => setDeleteModalTarget(null)}
-          onConfirm={handleConfirmDeleteProject}
-        />
-      )}
-
-      {/* 新建/编辑配置的初始化向导模态框 */}
       {wizardOpen && (
         <ProjectWizard
-          project={wizardEditingProject}
+          project={null}
           allSkills={allSkills}
-          onClose={handleWizardClose}
+          onClose={(changed) => {
+            setWizardOpen(false)
+            if (changed) afterChange('项目已创建')
+          }}
         />
       )}
 
-      {/* 仓库技能挑选模态框 */}
       {pickerProject && (
         <WarehouseSkillPickerModal
-          isOpen={!!pickerProject}
+          isOpen
           onClose={() => setPickerProject(null)}
           projectName={pickerProject.name}
           projectPath={pickerProject.path}
-          targetIde={pickerProject.profile?.targetIde || 'claude-code'}
-          installedSkillNames={pickerProject.profile?.skills || []}
+          targetIde={pickerProject.profile.ides.map(ideName).join(' / ') || '未选择 IDE'}
+          installedSkillNames={projects.find((x) => x.path === pickerProject.path)?.profile.skills ?? pickerProject.profile.skills}
           allSkills={allSkills}
-          onToggleSkill={handleTogglePickerSkill}
+          onToggleSkill={async (name, installed) => {
+            const cur = projects.find((x) => x.path === pickerProject.path) ?? pickerProject
+            const skills = installed ? cur.profile.skills.filter((s) => s !== name) : [...cur.profile.skills, name]
+            await saveProfile(cur, { skills })
+          }}
         />
+      )}
+
+      {deleteTarget && (
+        <DeleteProjectModal
+          isOpen
+          projectName={deleteTarget.name}
+          projectPath={deleteTarget.path}
+          onClose={() => setDeleteTarget(null)}
+          onConfirm={async (purge) => {
+            await hideProject(deleteTarget.path, purge)
+            setDeleteTarget(null)
+          }}
+        />
+      )}
+    </div>
+  )
+}
+
+/** Selected IDEs as removable chips + a dropdown to add one (32 IDEs is too many to lay out). */
+function IdePicker({ catalog, selected, onChange, hint, disabled }: { catalog: IdeInfo[]; selected: string[]; onChange: (ides: string[]) => void; hint?: string; disabled?: boolean }) {
+  const byId = new Map(catalog.map((i) => [i.id, i]))
+  const others = catalog.filter((i) => !selected.includes(i.id))
+  return (
+    <div className="flex flex-wrap items-center gap-1.5">
+      {hint && <span className="text-[11px] text-slate-500 mr-1">{hint}</span>}
+      {selected.map((id) => {
+        const ide = byId.get(id)
+        return (
+          <span
+            key={id}
+            title={ide ? `写入 ${ide.writeDirs.join(' + ')}${ide.mode === 'copy' ? '（真实副本）' : ''}` : id}
+            className="pl-2 pr-1 py-0.5 rounded-full text-[11px] border border-indigo-400/60 bg-indigo-500/15 text-slate-100 inline-flex items-center gap-1"
+          >
+            {ide ? `${ide.icon} ${ide.name}` : id}
+            <button
+              disabled={disabled}
+              onClick={() => onChange(selected.filter((x) => x !== id))}
+              className="text-slate-400 hover:text-red-300 disabled:opacity-40 cursor-pointer px-0.5"
+              title="从项目中移除这个 IDE"
+            >
+              ✕
+            </button>
+          </span>
+        )
+      })}
+      <select
+        disabled={disabled}
+        value=""
+        onChange={(e) => e.target.value && onChange([...selected, e.target.value])}
+        className="text-[11px] py-0.5 pl-2 pr-6 rounded-full border border-dashed border-slate-700 bg-transparent text-slate-400 cursor-pointer"
+      >
+        <option value="">＋ 添加 IDE…</option>
+        {others.map((i) => (
+          <option key={i.id} value={i.id}>
+            {i.icon} {i.name}
+          </option>
+        ))}
+      </select>
+    </div>
+  )
+}
+
+interface CardProps {
+  project: ProjectRow
+  ideCatalog: IdeInfo[]
+  expanded: boolean
+  busy: boolean
+  cleanup: boolean
+  onToggleExpand: () => void
+  onSetIdes: (ides: string[]) => void
+  onRemoveSkill: (name: string) => void
+  onAddSkills: (names: string[]) => void
+  onPickSkills: () => void
+  onCleanup: (v: boolean) => void
+  onApply: () => void
+  onDelete: () => void
+  ideName: (id: string) => string
+}
+
+const SOURCE_BADGE: Record<InventoryItem['source'], { label: string; cls: string }> = {
+  local: { label: '项目自带', cls: 'bg-emerald-500/10 text-emerald-300' },
+  warehouse: { label: '仓库', cls: 'bg-slate-800 text-slate-400' },
+  missing: { label: '找不到来源', cls: 'bg-red-500/10 text-red-300' },
+}
+
+const LIST_PREVIEW = 12
+
+function ProjectCard(props: CardProps) {
+  const { project: p, expanded, busy, cleanup } = props
+  const [showAll, setShowAll] = useState(false)
+  const cleanupCount = p.counts.legacy
+  const applicable = p.pending + (cleanup ? cleanupCount : 0)
+  const listed = p.inventory.filter((i) => i.inList)
+  const untracked = p.inventory.filter((i) => !i.inList)
+  const untrackedLocal = untracked.filter((i) => i.untrackedKind === 'local')
+  const visible = showAll ? listed : listed.slice(0, LIST_PREVIEW)
+  const ides = useMemo(() => props.ideCatalog.filter((i) => p.profile.ides.includes(i.id)), [props.ideCatalog, p.profile.ides])
+
+  return (
+    <div className="bg-slate-900/40 border border-slate-800/80 rounded-xl">
+      {/* Header */}
+      <div className="p-4 pb-2 flex items-start justify-between gap-4 flex-wrap">
+        <div className="min-w-0 flex-1">
+          <div className="flex items-center gap-2 flex-wrap">
+            <span className="text-sm font-semibold text-slate-100">{p.name}</span>
+            <span className="text-[11px] text-slate-500">{listed.length} 个 Skill</span>
+            {p.pending > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300">待同步 {p.pending}</span>}
+            {p.counts.conflict > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-red-500/10 text-red-300">冲突 {p.counts.conflict}</span>}
+            {untracked.length > 0 && <span className="text-[10px] px-1.5 py-0.5 rounded bg-sky-500/10 text-sky-300">未纳入 {untracked.length}</span>}
+            {p.pending === 0 && p.counts.conflict === 0 && p.profile.ides.length > 0 && listed.length > 0 && (
+              <span className="text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300">已同步</span>
+            )}
+          </div>
+          <div className="text-[11px] text-slate-500 truncate mt-0.5" title={p.path}>{p.path}</div>
+        </div>
+        <div className="flex gap-2 shrink-0">
+          <button onClick={props.onPickSkills} className="px-3 py-1 text-xs rounded bg-slate-800 text-slate-300 hover:text-white cursor-pointer">＋ 添加 Skill</button>
+          <button
+            onClick={props.onApply}
+            disabled={busy || applicable === 0}
+            className="px-3 py-1 text-xs rounded bg-indigo-600 disabled:opacity-40 disabled:cursor-not-allowed cursor-pointer"
+          >
+            {busy ? '处理中…' : applicable ? `应用 ${applicable} 项` : '无需同步'}
+          </button>
+        </div>
+      </div>
+
+      <div className="px-4 pb-3">
+        <IdePicker catalog={props.ideCatalog} selected={p.profile.ides} onChange={props.onSetIdes} disabled={busy} hint="同步到：" />
+        {p.profile.ides.length === 0 && <div className="text-[11px] text-amber-400/90 mt-1.5">还没有选择 IDE，这个项目的 Skill 不会同步到任何地方。</div>}
+        {ides.some((i) => i.viaGlobal) && (
+          <div className="text-[11px] text-sky-300/80 mt-1.5">
+            {ides.filter((i) => i.viaGlobal).map((i) => i.name).join('、')}没有项目级 Skill：这里的仓库 Skill 会以副本放进它的账号级目录，在它的所有项目里都可见。
+          </div>
+        )}
+      </div>
+
+      {/* The project's skills — always visible */}
+      <div className="border-t border-slate-800/80 px-4 py-3">
+        {listed.length === 0 ? (
+          <div className="text-xs text-slate-500">
+            这个项目还没有 Skill。点「＋ 添加 Skill」从仓库添加
+            {untrackedLocal.length > 0 ? '，或把下面在项目里发现的 Skill 纳入列表。' : '。'}
+          </div>
+        ) : (
+          <div className="overflow-x-auto">
+            <table className="text-xs w-full">
+              <thead>
+                <tr className="text-slate-500 text-[11px]">
+                  <th className="text-left font-medium pb-1.5 pr-3">项目里的 Skill（{listed.length}）</th>
+                  {ides.map((ide) => (
+                    <th key={ide.id} className="font-medium pb-1.5 px-2 text-center whitespace-nowrap" title={`写入 ${ide.writeDirs.join(' + ')}${ide.mode === 'copy' ? '（真实副本）' : ''}`}>
+                      {ide.icon} {ide.name}
+                    </th>
+                  ))}
+                  <th className="w-6" />
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-slate-800/50">
+                {visible.map((item) => (
+                  <tr key={item.name} className="group">
+                    <td className="py-1.5 pr-3 max-w-[28rem]">
+                      <div className="flex items-center gap-2 min-w-0">
+                        <span className="font-mono text-slate-200 truncate">/{item.name}</span>
+                        <span
+                          className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded ${SOURCE_BADGE[item.source].cls}`}
+                          title={item.source === 'local' ? `位于 ${item.localRel}` : undefined}
+                        >
+                          {SOURCE_BADGE[item.source].label}
+                        </span>
+                      </div>
+                      {item.description && (
+                        <div className="text-[11px] text-slate-500 truncate" title={item.description}>{item.description}</div>
+                      )}
+                    </td>
+                    {ides.map((ide) => {
+                      const st = p.matrix[item.name]?.[ide.id] ?? 'pending'
+                      return (
+                        <td key={ide.id} className={`text-center px-2 ${CELL[st].cls}`} title={CELL[st].label}>
+                          {CELL[st].icon}
+                        </td>
+                      )
+                    })}
+                    <td className="text-right">
+                      <button
+                        onClick={() => props.onRemoveSkill(item.name)}
+                        className="text-slate-600 opacity-0 group-hover:opacity-100 hover:text-red-400 cursor-pointer"
+                        title={item.source === 'local' ? '从列表移除（项目里的文件不会删除）' : '从项目移除'}
+                      >
+                        ✕
+                      </button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            {listed.length > LIST_PREVIEW && (
+              <button onClick={() => setShowAll((v) => !v)} className="mt-1.5 text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer">
+                {showAll ? '收起' : `显示全部 ${listed.length} 个`}
+              </button>
+            )}
+          </div>
+        )}
+
+        {/* Found in the project folder but not on the list */}
+        {untracked.length > 0 && (
+          <div className="mt-3 rounded-lg border border-sky-500/20 bg-sky-500/5 p-3">
+            <div className="flex items-center justify-between gap-2 mb-1.5">
+              <span className="text-[11px] font-medium text-sky-200">在项目目录里发现、但不在列表中（{untracked.length}）</span>
+              {untrackedLocal.length > 1 && (
+                <button onClick={() => props.onAddSkills(untrackedLocal.map((i) => i.name))} className="text-[11px] text-sky-300 hover:text-white cursor-pointer">
+                  全部纳入项目自带的 {untrackedLocal.length} 个
+                </button>
+              )}
+            </div>
+            <div className="space-y-1">
+              {untracked.map((item) => (
+                <div key={item.name} className="flex items-center gap-2 text-xs">
+                  <span className="font-mono text-slate-300 truncate">/{item.name}</span>
+                  <span className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded ${item.untrackedKind === 'local' ? SOURCE_BADGE.local.cls : 'bg-slate-800 text-slate-500'}`}>
+                    {item.untrackedKind === 'local' ? `项目自带 · ${item.localRel}` : '旧链接/副本'}
+                  </span>
+                  <span className="text-[10px] text-slate-600 truncate flex-1" title={item.foundIn.join('\n')}>{item.foundIn.join('、')}</span>
+                  {item.source !== 'missing' && (
+                    <button onClick={() => props.onAddSkills([item.name])} className="shrink-0 text-[11px] px-2 py-0.5 rounded bg-sky-500/15 text-sky-200 hover:bg-sky-500/25 cursor-pointer">
+                      纳入列表
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+            <div className="text-[10px] text-slate-500 mt-1.5">纳入后会同步到项目的每个 IDE；不纳入也不会删除这些文件。</div>
+          </div>
+        )}
+      </div>
+
+      {/* Details */}
+      <div className="border-t border-slate-800/80 px-4 py-2">
+        <button onClick={props.onToggleExpand} className="text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer">
+          {expanded ? '收起详情' : `详情${p.strayDirs.length ? `（其它 IDE 目录 ${p.strayDirs.length}）` : ''}${p.warnings.length ? ` · ${p.warnings.length} 条提示` : ''}`}
+        </button>
+      </div>
+
+      {expanded && (
+        <div className="px-4 pb-4 space-y-3">
+          <div className="flex flex-wrap gap-3 text-[10px] text-slate-500">
+            {(Object.keys(CELL) as CellStatus[]).map((k) => (
+              <span key={k}><span className={CELL[k].cls}>{CELL[k].icon}</span> {CELL[k].label}</span>
+            ))}
+          </div>
+
+          {p.warnings.length > 0 && (
+            <ul className="text-[11px] text-amber-400/90 list-disc pl-4">{p.warnings.map((w) => <li key={w}>{w}</li>)}</ul>
+          )}
+
+          {p.strayDirs.length > 0 && (
+            <div className="text-[11px] text-slate-400 bg-slate-950/40 border border-slate-800/60 rounded-lg p-3 space-y-1">
+              <div className="text-slate-300 font-medium">项目里还有其它 IDE 目录</div>
+              {p.strayDirs.map((d) => (
+                <div key={d.rel}>
+                  <code className="text-slate-300">{d.rel}</code>
+                  {' '}— {d.readBy.length ? `${d.readBy.map(props.ideName).join(' / ')} 会读取` : '没有 IDE 读取'}；
+                  Skill Studio 管理的 {d.managed} 项{d.real ? `，你自己的真实目录 ${d.real} 个（不会动）` : ''}
+                  {d.managed > 0 && d.readBy.some((id) => p.profile.ides.includes(id)) && (
+                    <span className="text-amber-300/90">；应用时会迁移到项目的写入目录，避免同一个 IDE 看到两份</span>
+                  )}
+                  {d.readBy.length > 0 && d.readBy.some((id) => !p.profile.ides.includes(id)) && (
+                    <button
+                      onClick={() => props.onSetIdes([...p.profile.ides, d.readBy.find((id) => !p.profile.ides.includes(id))!])}
+                      className="ml-2 underline hover:text-slate-200 cursor-pointer"
+                    >
+                      把 {props.ideName(d.readBy.find((id) => !p.profile.ides.includes(id))!)} 加入项目
+                    </button>
+                  )}
+                </div>
+              ))}
+              {cleanupCount > 0 && (
+                <label className="flex items-center gap-2 pt-1 select-none">
+                  <input type="checkbox" checked={cleanup} onChange={(e) => props.onCleanup(e.target.checked)} />
+                  应用时一并清理这些旧目录里由 Skill Studio 管理的 {cleanupCount} 项（只删链接/受管副本，改过的副本进回收站）
+                </label>
+              )}
+            </div>
+          )}
+
+          <div className="flex justify-end">
+            <button onClick={props.onDelete} className="text-[11px] text-slate-500 hover:text-red-400 cursor-pointer">从列表中移除项目…</button>
+          </div>
+        </div>
       )}
     </div>
   )

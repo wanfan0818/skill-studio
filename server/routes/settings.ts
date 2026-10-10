@@ -4,6 +4,8 @@ import path from 'path'
 import os from 'os'
 import { invalidateCache } from './skills.js'
 import { readIdeSettingsFull, writeIdeSettingsFull, warehouseDirsFrom, type AppSettings } from '../settings.js'
+import { resolvePreferredIdes } from '../ides.js'
+import { isValidAgentId } from '../scanner/agents.js'
 
 const homedir = os.homedir()
 
@@ -15,7 +17,30 @@ export async function settingsRoutes(app: FastifyInstance) {
     const { githubToken, ...rest } = settings
     // The token never leaves the server; the UI only needs to know it exists.
     // `warehouses` is the resolved list (including the default when unset).
-    return { ok: true, settings: { ...rest, hasGithubToken: !!githubToken, warehouses: warehouseDirsFrom(settings) } }
+    const preferred = await resolvePreferredIdes()
+    return {
+      ok: true,
+      settings: {
+        ...rest,
+        hasGithubToken: !!githubToken,
+        warehouses: warehouseDirsFrom(settings),
+        // Resolved list (explicit, or derived from what is in use).
+        preferredIdes: preferred.ides,
+        preferredIdesIsDefault: preferred.isDefault,
+      },
+    }
+  })
+
+  // Set the IDEs shown in pickers; `null` / [] returns to automatic detection.
+  app.post<{ Body: { preferredIdes: string[] | null } }>('/api/settings/preferred-ides', async (req, reply) => {
+    const list = req.body?.preferredIdes
+    if (list !== null && (!Array.isArray(list) || !list.every((x) => typeof x === 'string' && isValidAgentId(x)))) {
+      reply.status(400)
+      return { ok: false, error: 'preferredIdes 必须是 IDE id 数组或 null' }
+    }
+    const settings = await readIdeSettingsFull()
+    await writeIdeSettingsFull({ ...settings, preferredIdes: list && list.length ? list : undefined })
+    return { ok: true, ...(await resolvePreferredIdes()) }
   })
 
   // POST /api/settings
@@ -59,6 +84,7 @@ export async function settingsRoutes(app: FastifyInstance) {
           ? githubToken.trim()
           : oldSettings.githubToken,
       httpProxy: httpProxy !== undefined ? httpProxy : oldSettings.httpProxy,
+      preferredIdes: oldSettings.preferredIdes,
       // Legacy distribution fields: migrated into distribution.json, kept
       // untouched here (they used to be dropped on every save).
       enabledAgentIds: oldSettings.enabledAgentIds,

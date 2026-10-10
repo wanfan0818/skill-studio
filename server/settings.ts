@@ -14,6 +14,11 @@ export interface AppSettings {
   skillWarehouses?: string[]
   githubToken?: string
   httpProxy?: string
+  /**
+   * IDEs the user actually uses; only these appear in IDE pickers. Unset →
+   * derived from distribution rules and project configs (see preferredIdes()).
+   */
+  preferredIdes?: string[]
   /** @deprecated migrated into distribution.json */
   enabledAgentIds?: string[]
   /** @deprecated migrated into distribution.json */
@@ -44,6 +49,7 @@ export async function readIdeSettingsFull(): Promise<AppSettings> {
       : undefined,
     githubToken: typeof parsed.githubToken === 'string' ? parsed.githubToken : undefined,
     httpProxy: typeof parsed.httpProxy === 'string' ? parsed.httpProxy : undefined,
+    preferredIdes: Array.isArray(parsed.preferredIdes) ? parsed.preferredIdes.filter((x: unknown) => typeof x === 'string') : undefined,
     enabledAgentIds: Array.isArray(parsed.enabledAgentIds) ? parsed.enabledAgentIds : undefined,
     skillOverrides: parsed.skillOverrides && typeof parsed.skillOverrides === 'object' ? parsed.skillOverrides : undefined,
   }

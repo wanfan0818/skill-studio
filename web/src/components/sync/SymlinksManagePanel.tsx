@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react'
 import type { Skill } from '../../hooks/useSkills'
 import { AGENT_ORDER, AGENT_META } from '../../agents'
 import { DistributionPanel } from '../DistributionPanel'
+import { usePreferredIdes } from '../../hooks/usePreferredIdes'
 
 export interface Anomaly {
   id: string
@@ -23,6 +24,7 @@ export interface AgentStat {
 }
 
 export function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
+  const preferredIdes = usePreferredIdes()
   const [anomalies, setAnomalies] = useState<Anomaly[]>([])
   const [, setAgentStats] = useState<AgentStat[]>([])
   const [loading, setLoading] = useState(true)
@@ -267,7 +269,7 @@ export function SymlinksManagePanel({ allSkills }: { allSkills: Skill[] }) {
                 className="w-full text-xs text-slate-300"
               >
                 <option value="">-- 选择目标 IDE --</option>
-                {AGENT_ORDER.map((id) => {
+                {AGENT_ORDER.filter((id) => preferredIdes?.includes(id)).map((id) => {
                   const meta = AGENT_META[id]
                   if (!meta || id === 'unknown') return null
                   return (

@@ -1,5 +1,6 @@
 import { useEffect, useState, useCallback } from 'react'
 import { useSkills } from './hooks/useSkills'
+import { usePreferredIdes } from './hooks/usePreferredIdes'
 import { useWebSocket } from './hooks/useWebSocket'
 import { useTheme } from './hooks/useTheme'
 import { StatsBar } from './components/StatsBar'
@@ -50,6 +51,7 @@ function App() {
   const [updaterOpen, setUpdaterOpen] = useState<boolean>(false)
   const [globalModalOpen, setGlobalModalOpen] = useState<boolean>(false)
   const [pendingDist, setPendingDist] = useState<number>(0)
+  const preferredIdes = usePreferredIdes()
   const [syncTab, setSyncTab] = useState<'github' | 'symlinks' | 'settings' | undefined>(undefined)
   const [distTick, setDistTick] = useState(0)
 
@@ -318,7 +320,11 @@ function App() {
         {/* 第二栏：核心内容工作区 (中栏) */}
         <div className="flex-1 flex flex-col min-w-0 h-full bg-slate-950/20">
           {view === 'projects' ? (
-            <ProjectsView allSkills={allSkills} onRefreshSkills={scan} />
+            // Same scroll container as the other views: the column above is
+            // h-full + overflow-hidden, so without it long project lists were cut off.
+            <div className="flex-1 overflow-y-auto px-6 py-5 min-w-0">
+              <ProjectsView allSkills={allSkills} onRefreshSkills={scan} />
+            </div>
           ) : (
             <>
               {/* Top Bar for header title & actions */}
@@ -593,7 +599,7 @@ function App() {
                             className="px-2 py-1 disabled:opacity-40 disabled:cursor-not-allowed text-[11px] cursor-pointer"
                           >
                             <option value="">批量挂载到 IDE...</option>
-                            {AGENT_ORDER.map((id) => {
+                            {AGENT_ORDER.filter((id) => preferredIdes?.includes(id)).map((id) => {
                               const meta = AGENT_META[id]
                               if (!meta || id === 'unknown') return null
                               return (

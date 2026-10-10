@@ -13,6 +13,8 @@ interface AgentRow {
   realCount: number
   rule: { mode: Mode; include?: string[]; exclude?: string[] } | null
   linkMode?: 'symlink' | 'copy'
+  preferred?: boolean
+  fromProjects?: number
   desired: number
   satisfied: number
   sharedDirWith: string[]
@@ -68,7 +70,6 @@ export function DistributionPanel({ onApplied }: { onApplied?: () => void }) {
   const [applying, setApplying] = useState(false)
   const [includeLegacy, setIncludeLegacy] = useState(false)
   const [showDetails, setShowDetails] = useState(false)
-  const [showAllAgents, setShowAllAgents] = useState(false)
   const [notice, setNotice] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
 
   const refresh = useCallback(async () => {
@@ -144,10 +145,8 @@ export function DistributionPanel({ onApplied }: { onApplied?: () => void }) {
     }
   }
 
-  const visibleAgents = useMemo(() => {
-    const relevant = agents.filter((a) => a.rule || a.exists)
-    return showAllAgents ? agents : relevant
-  }, [agents, showAllAgents])
+  // Only the IDEs the user uses, plus any IDE that already has a rule.
+  const visibleAgents = useMemo(() => agents.filter((a) => a.preferred || a.rule), [agents])
 
   const grouped = useMemo(() => {
     const out: Partial<Record<ActionType, PlanAction[]>> = {}
@@ -280,6 +279,7 @@ export function DistributionPanel({ onApplied }: { onApplied?: () => void }) {
                     <span>软链 {a.symlinkCount}</span>
                     <span className={a.realCount ? 'text-red-400' : ''}>物理 {a.realCount}</span>
                     {!!a.rule?.include?.length && <span>额外包含 {a.rule.include.length}</span>}
+                    {!!a.fromProjects && <span className="text-sky-300/90" title="选择了这个 IDE 的项目需要的 Skill">项目需要 {a.fromProjects}</span>}
                     {!!a.rule?.exclude?.length && <span>排除 {a.rule.exclude.length}</span>}
                     {a.sharedDirWith.length > 0 && <span className="text-amber-400/80">与 {a.sharedDirWith.map(agentName).join('、')} 共用同一目录</span>}
                   </div>
@@ -300,9 +300,7 @@ export function DistributionPanel({ onApplied }: { onApplied?: () => void }) {
             )
           })}
         </div>
-        <button onClick={() => setShowAllAgents((v) => !v)} className="text-[11px] text-slate-500 hover:text-slate-300 cursor-pointer">
-          {showAllAgents ? '只显示已托管或已安装的 IDE' : `显示全部 ${agents.length} 个 IDE`}
-        </button>
+        <div className="text-[11px] text-slate-500">只显示常用 IDE；在「自定义路径 → 常用 IDE」里调整。</div>
       </div>
     </div>
   )

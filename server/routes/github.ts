@@ -65,24 +65,110 @@ export async function resolveInstallFolderName(skillPath: string, cloneDir: stri
   return usableName(repoName) ? repoName : null
 }
 
-/** Accept `owner/repo`, an https:// git URL, or an scp-style `git@host:owner/repo`. */
-export function normalizeCloneUrl(input: string): string | null {
-  const s = input.trim()
-  if (!s || s.startsWith('-') || /[\s\0]/.test(s)) return null
-  if (/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/.test(s)) return `https://github.com/${s}.git`
-  if (/^git@[A-Za-z0-9.-]+:[A-Za-z0-9_.\/-]+$/.test(s)) return s
-  try {
-    const u = new URL(s)
-    if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
-    // A GitHub page URL (…/owner/repo/tree/main/sub, /blob/…) is what people
-    // copy from the browser; git can only clone the repository root.
-    if (u.hostname === 'github.com' || u.hostname === 'www.github.com') {
-      const [owner, repo] = u.pathname.split('/').filter(Boolean)
-      if (owner && repo) return `https://github.com/${owner}/${repo.replace(/\.git$/, '')}.git`
+export interface RepoInput {
+  cloneUrl: string
+  /** `owner/repo` for GitHub inputs. */
+  repo?: string
+  /** Directory inside the repo the user pointed at (from a /tree/ or /blob/ URL). */
+  subPath?: string
+  /** A single skill the user pointed at (`owner/repo@skill`, skills.sh, `--skill x`). */
+  skill?: string
+}
+
+const SEG = /^[A-Za-z0-9_.-]+$/
+
+function github(owner: string, repo: string, extra: Partial<RepoInput> = {}): RepoInput | null {
+  repo = repo.replace(/\.git$/, '')
+  if (!SEG.test(owner) || !SEG.test(repo) || owner.startsWith('.') || repo.startsWith('.')) return null
+  return { cloneUrl: `https://github.com/${owner}/${repo}.git`, repo: `${owner}/${repo}`, ...extra }
+}
+
+/**
+ * Parse whatever people paste into the market box:
+ *   owner/repo · owner/repo@skill · owner/repo.git
+ *   github.com/owner/repo (with or without https://, www.)
+ *   https://github.com/owner/repo/tree/<ref>/<dir> · …/blob/<ref>/<dir>/SKILL.md
+ *   https://skills.sh/owner/repo/skill (the links shown in market results)
+ *   npx skills add owner/repo [--skill name]
+ *   git@host:owner/repo.git · any other https:// git URL
+ */
+export function parseRepoInput(input: string): RepoInput | null {
+  if (typeof input !== 'string') return null
+  let s = input.trim().replace(/^["'<]+|["'>]+$/g, '')
+  if (!s || s.startsWith('-') || s.includes('\0')) return null
+
+  // `npx skills add <src> [--skill <name>]` (also `npx -y skills add …`, `skills add …`)
+  const cli = s.match(/^(?:npx\s+(?:-y\s+)?)?skills\s+(?:add|install|i)\s+(.+)$/i)
+  if (cli) {
+    const parts = cli[1].split(/\s+/)
+    let skill: string | undefined
+    let src: string | undefined
+    for (let i = 0; i < parts.length; i++) {
+      if (parts[i] === '--skill' || parts[i] === '-s') skill = parts[++i]
+      else if (!parts[i].startsWith('-') && !src) src = parts[i]
     }
-    return u.toString()
-  } catch {}
-  return null
+    const r = src ? parseRepoInput(src) : null
+    return r && skill && SEG.test(skill) ? { ...r, skill } : r
+  }
+  if (/\s/.test(s)) return null
+
+  // owner/repo or owner/repo@skill
+  const short = s.match(/^([A-Za-z0-9_.-]+)\/([A-Za-z0-9_.-]+?)\/?(?:@([A-Za-z0-9_.-]+))?$/)
+  if (short) return github(short[1], short[2], short[3] ? { skill: short[3] } : {})
+
+  if (/^git@[A-Za-z0-9.-]+:[A-Za-z0-9_.\/-]+$/.test(s)) return { cloneUrl: s }
+
+  if (/^(www\.)?(github\.com|skills\.sh)\//i.test(s)) s = 'https://' + s
+  let u: URL
+  try {
+    u = new URL(s)
+  } catch {
+    return null
+  }
+  if (u.protocol !== 'https:' && u.protocol !== 'http:') return null
+  const host = u.hostname.toLowerCase().replace(/^www\./, '')
+  const segs = u.pathname.split('/').filter(Boolean).map(decodeURIComponent)
+
+  if (host === 'skills.sh') {
+    const [owner, repo, skill] = segs
+    if (!owner || !repo) return null
+    return github(owner, repo, skill && SEG.test(skill) ? { skill } : {})
+  }
+  if (host === 'github.com') {
+    // Browser URLs: …/owner/repo/tree/main/sub, /blob/main/sub/SKILL.md.
+    // git can only clone the root, so remember the directory to narrow results.
+    const [owner, repo, kind, , ...rest] = segs
+    if (!owner || !repo) return null
+    let sub = kind === 'tree' || kind === 'blob' ? rest : []
+    if (kind === 'blob' && sub.length && /\.md$/i.test(sub[sub.length - 1])) sub = sub.slice(0, -1)
+    const subPath = sub.filter((p) => p !== '..' && p !== '.').join('/')
+    return github(owner, repo, subPath ? { subPath } : {})
+  }
+  if (host === 'raw.githubusercontent.com') {
+    const [owner, repo, , ...rest] = segs
+    if (!owner || !repo) return null
+    const sub = (/\.md$/i.test(rest[rest.length - 1] || '') ? rest.slice(0, -1) : rest).filter((p) => p !== '..' && p !== '.')
+    return github(owner, repo, sub.length ? { subPath: sub.join('/') } : {})
+  }
+  return { cloneUrl: u.toString() }
+}
+
+/** Clone URL for a pasted repository reference (see parseRepoInput). */
+export function normalizeCloneUrl(input: string): string | null {
+  return parseRepoInput(input)?.cloneUrl ?? null
+}
+
+/** Turn git's stderr into something a user can act on. */
+function cloneErrorMessage(err: any, input: RepoInput): string {
+  const msg = String(err?.message || err)
+  if (/not found|does not exist|Repository not found|could not read Username|Authentication failed|403/i.test(msg)) {
+    return `找不到仓库 ${input.repo ?? input.cloneUrl}（地址写错了，或者是私有仓库）`
+  }
+  if (/timed out|timeout/i.test(msg)) return `克隆 ${input.repo ?? input.cloneUrl} 超时，请检查网络或代理后重试`
+  if (/Could not resolve host|unable to access|Connection (refused|reset)|Failed to connect/i.test(msg)) {
+    return `无法连接 GitHub：${msg.split('\n').find((l) => /fatal|unable|Could not/i.test(l))?.trim() ?? msg}`
+  }
+  return `Git 克隆或解析失败: ${msg}`
 }
 
 async function findSkillsInDir(dir: string, depth: number = 0, maxDepth: number = 5): Promise<string[]> {
@@ -132,11 +218,12 @@ export async function githubRoutes(app: FastifyInstance) {
       return { ok: false, error: 'repoUrl is required' }
     }
 
-    const cloneUrl = typeof repoUrl === 'string' ? normalizeCloneUrl(repoUrl) : null
-    if (!cloneUrl) {
+    const input = parseRepoInput(repoUrl)
+    if (!input) {
       reply.status(400)
-      return { ok: false, error: '仓库地址格式不正确（支持 owner/repo、https:// 或 git@host:owner/repo）' }
+      return { ok: false, error: '仓库地址格式不正确（支持 owner/repo、owner/repo@skill、GitHub 网址、skills.sh 网址或 git@host:owner/repo）' }
     }
+    const { cloneUrl } = input
 
     pruneStaleClones()
     let tempDir: string | null = null
@@ -144,11 +231,26 @@ export async function githubRoutes(app: FastifyInstance) {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
       cloneDirs.set(tempDir, { createdAt: Date.now(), repoName: repoNameFromUrl(cloneUrl) })
 
-      await execFileSafe('git', ['clone', '--depth', '1', '--', cloneUrl, tempDir], {
-        timeoutMs: 30000,
+      await execFileSafe('git', ['clone', '--depth', '1', '--single-branch', '--', cloneUrl, tempDir], {
+        timeoutMs: 120_000,
+        // Never hang on a credential prompt for a private / mistyped repo.
+        env: { ...process.env, GIT_TERMINAL_PROMPT: '0' },
       })
 
-      const skillDirs = await findSkillsInDir(tempDir)
+      let skillDirs = await findSkillsInDir(tempDir)
+      let notice: string | undefined
+      // A /tree/<ref>/<dir> URL: keep only skills under that directory. The ref
+      // may itself contain slashes, so also try dropping leading segments.
+      if (input.subPath) {
+        const segs = input.subPath.split('/')
+        let narrowed: string[] = []
+        for (let i = 0; i < segs.length && !narrowed.length; i++) {
+          const base = path.join(tempDir, ...segs.slice(i))
+          narrowed = skillDirs.filter((d) => d === base || d.startsWith(base + path.sep))
+        }
+        if (narrowed.length) skillDirs = narrowed
+        else notice = `仓库里没有找到目录 ${input.subPath}，已列出全部 Skill`
+      }
       
       const skills = []
       for (const skillDir of skillDirs) {
@@ -194,10 +296,21 @@ export async function githubRoutes(app: FastifyInstance) {
         })
       }
 
+      let result = skills
+      if (input.skill) {
+        const want = input.skill.toLowerCase()
+        const hit = skills.filter((k) => k.dirName.toLowerCase() === want || String(k.name).toLowerCase() === want)
+        if (hit.length) result = hit
+        else notice = `仓库里没有找到 Skill「${input.skill}」，已列出全部 Skill`
+      }
+      if (!result.length) notice = notice ?? '这个仓库里没有找到包含 SKILL.md 的目录'
+
       return {
         ok: true,
         tempPath: tempDir,
-        skills
+        repo: input.repo ?? null,
+        notice,
+        skills: result
       }
     } catch (err: any) {
       // Don't leave a half-cloned temp dir behind.
@@ -206,7 +319,7 @@ export async function githubRoutes(app: FastifyInstance) {
         await fs.rm(tempDir, { recursive: true, force: true }).catch(() => {})
       }
       reply.status(500)
-      return { ok: false, error: `Git 克隆或解析失败: ${err.message}` }
+      return { ok: false, error: cloneErrorMessage(err, input) }
     }
   })
 

@@ -8,7 +8,6 @@ import { settingsRoutes } from './settings.js'
  * Former 1400-line grab bag, now split by concern. Kept as an aggregator so
  * existing registrations / imports keep working.
  */
-export { syncProjectSkills, type ProjectSyncResult } from '../projects/sync.js'
 export { readIdeSettingsFull, writeIdeSettingsFull, type AppSettings } from '../settings.js'
 
 export async function manageRoutes(app: FastifyInstance) {

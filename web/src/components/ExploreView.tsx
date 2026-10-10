@@ -159,23 +159,32 @@ export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
     setError(null)
     setSearched(true)
 
-    const isGithub = /github\.com/i.test(search) || /^[a-zA-Z0-9_-]+\/[a-zA-Z0-9_-]+$/i.test(search.trim())
+    // Repository references: owner/repo(@skill), GitHub / skills.sh URLs,
+    // `npx skills add …`, git@host:…  Anything else is a keyword search.
+    const q = search.trim()
+    const isGithub =
+      /^(https?:\/\/)?(www\.)?(github\.com|skills\.sh|raw\.githubusercontent\.com)\//i.test(q) ||
+      /^git@/i.test(q) ||
+      /^(npx\s+(-y\s+)?)?skills\s+(add|install|i)\s/i.test(q) ||
+      /^https?:\/\/\S+\.git\/?$/i.test(q) ||
+      /^[\w.-]+\/[\w.-]+\/?(@[\w.-]+)?$/.test(q)
 
     try {
       if (isGithub) {
         const res = await fetch('/api/skills/market/github-clone', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ repoUrl: search }),
+          body: JSON.stringify({ repoUrl: q }),
         })
         const data = await res.json()
         if (res.ok && data.ok) {
+          const repo: string = data.repo || q
           const githubItems: MarketItem[] = (data.skills || []).map((skill: any) => ({
             fullId: `github@${skill.dirName}`,
-            repoPath: search.trim(),
+            repoPath: repo,
             name: skill.name,
             installs: skill.hasFrontmatter ? '✓ 含 YAML 标头' : '⚠️ 缺失标头',
-            url: `https://github.com/${search.trim()}`,
+            url: data.repo ? `https://github.com/${data.repo}` : '',
             description: skill.description,
             isGitHubImport: true,
             absPath: skill.absPath,
@@ -184,6 +193,7 @@ export function ExploreView({ projects, onInstalled }: ExploreViewProps) {
             dirName: skill.dirName,
           }))
           setItems(githubItems)
+          if (data.notice) setError(data.notice)
         } else {
           setError(data.error || 'GitHub 仓库解析失败')
         }

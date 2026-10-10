@@ -36,6 +36,7 @@ export interface SourceSkill {
   path: string
   realPath: string
   warehouse: string
+  description?: string
 }
 
 export type ActionType = 'link' | 'relink' | 'copy' | 'update' | 'unlink' | 'legacy' | 'conflict'
@@ -58,6 +59,12 @@ export interface PlanAction {
   mode: 'symlink' | 'copy'
   /** The entry at linkPath is a managed physical copy (copy mode). */
   isCopy?: boolean
+  /** Symlink text to write when it differs from `target` (relative links). */
+  linkText?: string
+  /** Set for project actions: the project root. */
+  projectPath?: string
+  /** Project action carried out by global distribution (projectViaGlobal agents). */
+  viaGlobal?: boolean
 }
 
 export interface TargetSummary {
@@ -68,6 +75,8 @@ export interface TargetSummary {
   sharedWith: string[]
   mode: 'symlink' | 'copy'
   exists: boolean
+  /** Desired skills that are there only because projects need them. */
+  fromProjects?: number
   desired: number
   satisfied: number
 }
@@ -102,7 +111,7 @@ interface CopyMarker {
   [k: string]: unknown
 }
 
-async function readMarker(dir: string): Promise<CopyMarker | null> {
+export async function readMarker(dir: string): Promise<CopyMarker | null> {
   try {
     return JSON.parse(await fs.readFile(path.join(dir, '.skill-source'), 'utf-8'))
   } catch {
@@ -120,7 +129,7 @@ export interface Inspection {
   plan: Plan
 }
 
-async function realOr(p: string, fallback: string | null = null): Promise<string | null> {
+export async function realOr(p: string, fallback: string | null = null): Promise<string | null> {
   try {
     return await fs.realpath(p)
   } catch {
@@ -152,10 +161,12 @@ export async function listSources(warehouses: string[], warnings: string[]): Pro
           return null
         }
         let name = entry.name
+        let description: string | undefined
         try {
           const parsed = await parseSkillMd(path.join(real, 'SKILL.md'))
           const fmName = parsed.frontmatter?.name
           if (typeof fmName === 'string' && fmName.trim()) name = fmName.trim()
+          if (typeof parsed.frontmatter?.description === 'string') description = parsed.frontmatter.description
         } catch {
           // No SKILL.md: still a skill if the directory has any file (scanner parity).
           const files = await fs.readdir(real, { withFileTypes: true }).catch(() => [])
@@ -165,7 +176,7 @@ export async function listSources(warehouses: string[], warnings: string[]): Pro
           warnings.push(`Skill 名称无法用作目录名，已跳过: ${entryPath}`)
           return null
         }
-        return { name, path: entryPath, realPath: real, warehouse: wh }
+        return { name, path: entryPath, realPath: real, warehouse: wh, description }
       },
     )
     for (const s of found) {
@@ -181,7 +192,30 @@ export async function listSources(warehouses: string[], warnings: string[]): Pro
   return sources
 }
 
-async function listGroups(state: DistributionState, warehouseReals: string[], warnings: string[]): Promise<Group[]> {
+/**
+ * Agents without project-level skills (projectViaGlobal, e.g. TeleAgent) get
+ * the skills of every configured project that selects them added to their
+ * global set. Returns agentId → skill → project names.
+ */
+export async function projectContributions(): Promise<Map<string, Map<string, string[]>>> {
+  const out = new Map<string, Map<string, string[]>>()
+  const viaGlobal = new Set(AGENTS.filter((a) => a.projectViaGlobal).map((a) => a.id as string))
+  if (!viaGlobal.size) return out
+  try {
+    const { listConfiguredProjects } = await import('../projects/model.js')
+    for (const p of await listConfiguredProjects()) {
+      for (const id of p.profile.ides) {
+        if (!viaGlobal.has(id)) continue
+        const m = out.get(id) ?? new Map<string, string[]>()
+        for (const skill of p.profile.skills) m.set(skill, [...(m.get(skill) ?? []), p.name])
+        out.set(id, m)
+      }
+    }
+  } catch {}
+  return out
+}
+
+async function listGroups(state: DistributionState, warehouseReals: string[], warnings: string[], alsoManaged: Set<string> = new Set()): Promise<Group[]> {
   const home = os.homedir()
   const byReal = new Map<string, Group>()
   for (const agent of AGENTS) {
@@ -190,7 +224,7 @@ async function listGroups(state: DistributionState, warehouseReals: string[], wa
       let g = byReal.get(realDir)
       if (!g) byReal.set(realDir, (g = { dir, realDir, agentIds: [], unmanaged: [], mode: 'symlink' }))
       if (agent.linkMode === 'copy') g.mode = 'copy'
-      if (state.agents[agent.id]) g.agentIds.push(agent.id)
+      if (state.agents[agent.id] || alsoManaged.has(agent.id)) g.agentIds.push(agent.id)
       else g.unmanaged.push(agent.id)
     }
   }
@@ -222,13 +256,13 @@ async function projectSkillDirReals(): Promise<Set<string>> {
   return out
 }
 
-function fingerprintOf(actions: PlanAction[]): string {
+export function fingerprintOf(actions: PlanAction[]): string {
   const h = crypto.createHash('sha1')
   for (const a of [...actions].sort((x, y) => x.id.localeCompare(y.id))) h.update(`${a.id}|${a.target ?? ''}\n`)
   return h.digest('hex').slice(0, 16)
 }
 
-function emptyCounts(): Record<ActionType, number> {
+export function emptyCounts(): Record<ActionType, number> {
   return { link: 0, relink: 0, copy: 0, update: 0, unlink: 0, legacy: 0, conflict: 0 }
 }
 
@@ -242,7 +276,8 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
 
   const sources = await listSources(warehouses, warnings)
   const sourceReals = new Set([...sources.values()].map((s) => s.realPath))
-  const groups = await listGroups(state, warehouseReals, warnings)
+  const contributions = await projectContributions()
+  const groups = await listGroups(state, warehouseReals, warnings, new Set(contributions.keys()))
 
   // For legacy detection: every agent global dir and every project skill dir.
   const agentDirReals = new Set<string>()
@@ -262,6 +297,15 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
   for (const g of groups) {
     const desired = new Set<string>()
     for (const id of g.agentIds) for (const n of desiredNames(state.agents[id], state, allNames)) if (sources.has(n)) desired.add(n)
+    // Skills projects need in an agent that has no project-level skills.
+    const neededBy = new Map<string, string[]>()
+    for (const id of g.agentIds) {
+      for (const [skill, projects] of contributions.get(id) ?? []) {
+        if (!sources.has(skill)) continue
+        if (!desired.has(skill)) neededBy.set(skill, projects)
+        desired.add(skill)
+      }
+    }
 
     let entries: import('fs').Dirent[] = []
     let exists = true
@@ -346,7 +390,9 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
 
     for (const name of desired) {
       if (seen.has(name)) continue
-      push({ type: copyMode ? 'copy' : 'link', name, linkPath: path.join(g.dir, name), target: sources.get(name)!.realPath, reason: copyMode ? '新增副本' : '新增' })
+      const forProjects = neededBy.get(name)
+      const why = forProjects ? `（项目「${forProjects.join('」「')}」需要）` : ''
+      push({ type: copyMode ? 'copy' : 'link', name, linkPath: path.join(g.dir, name), target: sources.get(name)!.realPath, reason: (copyMode ? '新增副本' : '新增') + why })
     }
 
     satisfied.set(g.realDir, ok)
@@ -359,6 +405,7 @@ export async function inspect(filter: PlanFilter = {}, stateOverride?: Distribut
       exists,
       desired: desired.size,
       satisfied: ok.size,
+      fromProjects: neededBy.size,
     })
   }
 
@@ -416,7 +463,7 @@ export interface ApplyResult {
  * marker; the caller renames it into place, so the agent never sees a
  * half-written skill.
  */
-async function materializeCopy(source: string, linkPath: string): Promise<string> {
+export async function materializeCopy(source: string, linkPath: string): Promise<string> {
   const tmp = path.join(path.dirname(linkPath), `.${path.basename(linkPath)}.ss-tmp-${crypto.randomBytes(4).toString('hex')}`)
   try {
     await copyDir(source, tmp, { skip: (n) => n === '.git' })
@@ -437,7 +484,7 @@ async function materializeCopy(source: string, linkPath: string): Promise<string
 }
 
 /** True when a managed copy still matches what we wrote (not edited in place). */
-async function copyUnmodified(dir: string): Promise<boolean> {
+export async function copyUnmodified(dir: string): Promise<boolean> {
   const marker = await readMarker(dir)
   return !!marker?.fingerprint && (await getSkillFolderHash(dir)) === marker.fingerprint
 }
@@ -453,21 +500,29 @@ async function lstatOrNull(p: string) {
 export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
   const current = await plan({ skills: opts.skills, agentIds: opts.agentIds })
   if (opts.fingerprint && opts.fingerprint !== current.fingerprint) throw new PlanChangedError()
+  return executeActions(current.actions, { includeLegacy: opts.includeLegacy })
+}
 
+/**
+ * Execute planned actions. Shared by global distribution and project sync.
+ * Every action re-checks the disk right before touching it; conflicts are
+ * never executed, legacy actions only with includeLegacy.
+ */
+export async function executeActions(actions: PlanAction[], opts: { includeLegacy?: boolean } = {}): Promise<ApplyResult> {
   const result: ApplyResult = { applied: 0, failed: 0, skipped: 0, results: [] }
   await withWriteLock(async () => {
-    for (const a of current.actions) {
+    for (const a of actions) {
       if (a.type === 'conflict' || (a.type === 'legacy' && !opts.includeLegacy)) {
         result.skipped++
         continue
       }
       try {
-        // Re-check what is on disk right before touching it.
         const st = await lstatOrNull(a.linkPath)
+        const linkText = a.linkText ?? a.target!
         if (a.type === 'link') {
           if (st) throw new Error('目标位置已被占用')
           await fs.mkdir(a.dir, { recursive: true })
-          await fs.symlink(a.target!, a.linkPath, 'dir')
+          await fs.symlink(linkText, a.linkPath, 'dir')
         } else if (a.type === 'update') {
           if (!st?.isDirectory() || st.isSymbolicLink() || !(await copyUnmodified(a.linkPath))) {
             throw new Error('副本已被修改或已不是受管副本，未覆盖')
@@ -477,9 +532,15 @@ export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
           await fs.rename(a.linkPath, old)
           await fs.rename(tmp, a.linkPath)
           await fs.rm(old, { recursive: true, force: true })
-        } else if (a.isCopy && a.type === 'unlink') {
+        } else if (a.isCopy && a.type === 'legacy' && a.target) {
+          // Replace an old, fingerprint-less copy: old one to the recycle bin.
           if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error('已不是受管副本，未改动')
-          // An untouched copy is just a duplicate of the warehouse; an edited
+          const tmp = await materializeCopy(a.target, a.linkPath)
+          await moveToTrash(a.linkPath, a.name)
+          await fs.rename(tmp, a.linkPath)
+        } else if (a.isCopy && (a.type === 'unlink' || a.type === 'legacy') && !a.target) {
+          if (!st?.isDirectory() || st.isSymbolicLink()) throw new Error('已不是受管副本，未改动')
+          // An untouched copy is just a duplicate of its source; an edited
           // one goes to the recycle bin.
           if (await copyUnmodified(a.linkPath)) await fs.rm(a.linkPath, { recursive: true, force: true })
           else await moveToTrash(a.linkPath, a.name)
@@ -492,7 +553,7 @@ export async function apply(opts: ApplyOptions = {}): Promise<ApplyResult> {
         } else {
           if (!st?.isSymbolicLink()) throw new Error('目标已不是符号链接，未改动')
           await fs.unlink(a.linkPath)
-          if (a.target) await fs.symlink(a.target, a.linkPath, 'dir') // relink, or legacy replacement
+          if (a.target) await fs.symlink(linkText, a.linkPath, 'dir') // relink, or legacy replacement
         }
         result.applied++
         result.results.push({ id: a.id, ok: true })
