@@ -50,3 +50,31 @@ describe('GitHub import: clone URL normalization', () => {
     expect(normalizeCloneUrl('--upload-pack=x')).toBeNull()
   })
 })
+
+describe('GitHub import: pasted address forms', () => {
+  it('parses every form people copy from the market, GitHub and skills.sh', async () => {
+    const { parseRepoInput } = await import('../server/routes/github')
+    const gh = 'https://github.com/acme/tools.git'
+    expect(parseRepoInput('acme/tools')).toEqual({ cloneUrl: gh, repo: 'acme/tools' })
+    expect(parseRepoInput('acme/tools.git')).toEqual({ cloneUrl: gh, repo: 'acme/tools' })
+    expect(parseRepoInput('acme/my.tools/')).toMatchObject({ repo: 'acme/my.tools' })
+    expect(parseRepoInput('acme/tools@pdf')).toEqual({ cloneUrl: gh, repo: 'acme/tools', skill: 'pdf' })
+    expect(parseRepoInput('github.com/acme/tools')).toMatchObject({ cloneUrl: gh })
+    expect(parseRepoInput('www.github.com/acme/tools/')).toMatchObject({ cloneUrl: gh })
+    expect(parseRepoInput('https://github.com/acme/tools/tree/main/skills/pdf')).toMatchObject({ cloneUrl: gh, subPath: 'skills/pdf' })
+    expect(parseRepoInput('https://github.com/acme/tools/blob/main/skills/pdf/SKILL.md')).toMatchObject({ subPath: 'skills/pdf' })
+    expect(parseRepoInput('https://github.com/acme/tools?tab=readme-ov-file#x')).toEqual({ cloneUrl: gh, repo: 'acme/tools' })
+    expect(parseRepoInput('https://skills.sh/acme/tools/pdf')).toEqual({ cloneUrl: gh, repo: 'acme/tools', skill: 'pdf' })
+    expect(parseRepoInput('skills.sh/acme/tools')).toEqual({ cloneUrl: gh, repo: 'acme/tools' })
+    expect(parseRepoInput('npx skills add acme/tools --skill pdf')).toEqual({ cloneUrl: gh, repo: 'acme/tools', skill: 'pdf' })
+    expect(parseRepoInput('npx -y skills add https://github.com/acme/tools')).toMatchObject({ cloneUrl: gh })
+    expect(parseRepoInput('  "acme/tools"  ')).toMatchObject({ cloneUrl: gh })
+    expect(parseRepoInput('git@github.com:acme/tools.git')).toEqual({ cloneUrl: 'git@github.com:acme/tools.git' })
+    for (const t of ['https://github.com/acme/tools/tree/main/../../x', 'https://github.com/acme/tools/tree/main/a/%2e%2e/%2e%2e/x']) {
+      expect(parseRepoInput(t)?.subPath ?? '').not.toContain('..')
+    }
+    expect(parseRepoInput('file:///etc')).toBeNull()
+    expect(parseRepoInput('just some words')).toBeNull()
+    expect(parseRepoInput('-c core.x=y')).toBeNull()
+  })
+})
