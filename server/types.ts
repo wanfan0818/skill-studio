@@ -30,6 +30,19 @@ export interface SkillGithubSource {
   lastChecked?: string
   updateAvailable?: boolean
   latestCommit?: string
+  /** Upstream commit the user chose not to take (keep local edits). */
+  ignoredCommit?: string
+  /** git tree SHA of the skill folder as installed / as upstream now (see server/updates/upstream.ts). */
+  installedTree?: string
+  latestTree?: string
+  /** Upstream tree the user chose not to take (keep local edits). */
+  ignoredTree?: string
+  /** The folder no longer exists upstream (removed, moved, or the repo is gone). */
+  upstreamMissing?: boolean
+  /** The repository can't be read (private without token access, or deleted). */
+  upstreamNoAccess?: boolean
+  /** The user detached it from its upstream: never look it up in lock files again. */
+  unbound?: boolean
   originPath?: string
   copiedAt?: string
 }

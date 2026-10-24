@@ -17,13 +17,13 @@ import { AboutModal } from './components/AboutModal'
 import { Footer } from './components/Footer'
 import { ExploreView } from './components/ExploreView'
 import { ProjectsView } from './components/ProjectsView'
-import { UpdaterPanel } from './components/UpdaterPanel'
+import { UpdatesView } from './components/UpdatesView'
 import { GlobalSkillsModal } from './components/GlobalSkillsModal'
 import type { Skill } from './hooks/useSkills'
 import { AGENT_ORDER, AGENT_META } from './agents'
 
 type GroupBy = 'none' | 'scope' | 'source' | 'project' | 'category'
-type View = 'skills' | 'similar' | 'explore' | 'dashboard' | 'trash' | 'sync' | 'conflicts' | 'projects'
+type View = 'skills' | 'similar' | 'explore' | 'dashboard' | 'trash' | 'sync' | 'conflicts' | 'projects' | 'updates'
 
 function App() {
   const { allSkills, skills, stats, projects, conflicts, categories, health, mergeSuggestions, loading, error, scan, filterSkills } = useSkills()
@@ -41,6 +41,16 @@ function App() {
   const [selectedSkill, setSelectedSkill] = useState<Skill | null>(null)
   const [lastUpdate, setLastUpdate] = useState<string | null>(null)
   const [trashCount, setTrashCount] = useState<number>(0)
+  const [updatesCount, setUpdatesCount] = useState<number>(0)
+  // Badge for 版本与更新: local state only, no GitHub calls.
+  useEffect(() => {
+    fetch('/api/updates')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.ok) setUpdatesCount(d.skills.filter((s: any) => s.state !== 'synced' || s.copies.length > 0 || s.source?.missing).length)
+      })
+      .catch(() => {})
+  }, [])
   const [selectMode, setSelectMode] = useState<boolean>(false)
   const [selectedIds, setSelectedIds] = useState<Set<string>>(new Set())
   const [bulkDeleteConfirm, setBulkDeleteConfirm] = useState<boolean>(false)
@@ -48,7 +58,6 @@ function App() {
   const [bulkDeleteResult, setBulkDeleteResult] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null)
   const [conflictRowBusy, setConflictRowBusy] = useState<Set<string>>(new Set())
   const [aboutOpen, setAboutOpen] = useState<boolean>(false)
-  const [updaterOpen, setUpdaterOpen] = useState<boolean>(false)
   const [globalModalOpen, setGlobalModalOpen] = useState<boolean>(false)
   const [pendingDist, setPendingDist] = useState<number>(0)
   const preferredIdes = usePreferredIdes()
@@ -312,6 +321,7 @@ function App() {
           setSelectedSkill(null) // 切换视图时清空选中的 Skill
         }}
         trashCount={trashCount}
+        updatesCount={updatesCount}
       />
 
       {/* 中间栏与右边栏的容器 */}
@@ -337,6 +347,7 @@ function App() {
                     {view === 'dashboard' && '大盘数据'}
                     {view === 'sync' && '路径配置与同步'}
                     {view === 'trash' && '回收站'}
+                    {view === 'updates' && '版本与更新'}
                     {view === 'conflicts' && '冲突管理'}
                   </span>
                   {view === 'skills' && (
@@ -413,9 +424,9 @@ function App() {
 
                   {/* Updater Button */}
                   <button
-                    onClick={() => setUpdaterOpen(true)}
+                    onClick={() => setView('updates')}
                     className="p-1.5 rounded-lg border border-slate-800 bg-slate-900 text-slate-400 hover:text-slate-200 transition-all flex items-center justify-center"
-                    title="更新管理器"
+                    title="版本与更新"
                   >
                     <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.5">
                       <path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67" />
@@ -463,6 +474,8 @@ function App() {
                   <Dashboard stats={stats} projects={projects} conflicts={conflicts} skills={allSkills} health={health} categories={categories} mergeSuggestions={mergeSuggestions} onSkillClick={setSelectedSkill} onScan={scan} />
                 ) : view === 'similar' ? (
                   <SimilarView onSkillClick={setSelectedSkill} />
+                ) : view === 'updates' ? (
+                  <UpdatesView onChanged={() => scan()} onCountChange={setUpdatesCount} />
                 ) : view === 'trash' ? (
                   <TrashView
                     onCountChange={setTrashCount}
@@ -752,13 +765,6 @@ function App() {
         onClose={() => setAboutOpen(false)}
         stats={stats}
         conflictCount={conflicts.length}
-      />
-
-      <UpdaterPanel
-        skills={allSkills}
-        isOpen={updaterOpen}
-        onClose={() => setUpdaterOpen(false)}
-        onUpdated={scan}
       />
 
       {globalModalOpen && (

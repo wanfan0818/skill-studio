@@ -35,6 +35,24 @@ async function statWalk(dir: string, baseDir: string, out: FileStat[]): Promise<
 }
 
 /**
+ * Cheap identity of a skill directory's contents: relative path, size and
+ * mtime of every non-hidden file, hashed. Needs only a stat walk — no file is
+ * read — so it can be checked for hundreds of skills on every page load.
+ * Equal signature ⇒ content unchanged; a different signature means the
+ * content MAY have changed (compare getSkillFolderHash to be sure).
+ */
+export async function getSkillFolderSignature(skillDir: string): Promise<string | null> {
+  try {
+    const files: FileStat[] = []
+    await statWalk(skillDir, skillDir, files)
+    files.sort((a, b) => a.rel.localeCompare(b.rel))
+    return crypto.createHash('md5').update(files.map((f) => `${f.rel}:${f.size}:${f.mtimeMs}`).join('\n')).digest('hex')
+  } catch {
+    return null
+  }
+}
+
+/**
  * Combined MD5 of all non-hidden files in a skill directory, for drift
  * comparison between a master skill and a materialized copy.
  */

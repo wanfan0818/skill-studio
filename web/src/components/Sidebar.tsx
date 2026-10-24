@@ -18,6 +18,8 @@ interface SidebarProps {
   currentView: string
   onViewChange: (v: any) => void
   trashCount: number
+  /** Skills whose versions need attention (upstream news, local edits, drifted copies). */
+  updatesCount?: number
 }
 
 export function Sidebar({
@@ -36,6 +38,7 @@ export function Sidebar({
   currentView,
   onViewChange,
   trashCount,
+  updatesCount = 0,
 }: SidebarProps) {
   const scopeItems = [
     { value: 'all', label: '全部', count: stats.total },
@@ -68,6 +71,7 @@ export function Sidebar({
   const menuItems = [
     { value: 'dashboard', label: '大盘数据', icon: '📊' },
     { value: 'skills', label: '技能库', icon: '📂', count: stats.total },
+    { value: 'updates', label: '版本与更新', icon: '🔄', count: updatesCount || undefined },
     { value: 'explore', label: '探索市场', icon: '🔍' },
     { value: 'projects', label: '项目管理', icon: '📁' },
     { value: 'sync', label: '路径与同步', icon: '⚙️' },
