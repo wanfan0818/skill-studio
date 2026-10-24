@@ -8,13 +8,15 @@ import { getWarehouseDirs } from '../settings.js'
 import { execFileSafe } from '../utils/exec.js'
 import { copyDir } from '../utils/fs.js'
 import { isInside, isPlainSegment } from '../utils/safe.js'
+import { recordInstall } from '../updates/status.js'
+import type { SkillGithubSource } from '../types.js'
 
 /**
  * Temp clone directories created by THIS server process. Install / preview
  * requests may only reference these — a client-supplied `tempPath` used to be
  * passed straight to `fs.rm(..., { recursive: true, force: true })`.
  */
-const cloneDirs = new Map<string, { createdAt: number; repoName: string }>()
+const cloneDirs = new Map<string, { createdAt: number; repoName: string; input?: RepoInput }>()
 const CLONE_TTL_MS = 60 * 60 * 1000
 
 function pruneStaleClones() {
@@ -207,6 +209,31 @@ async function findSkillsInDir(dir: string, depth: number = 0, maxDepth: number 
   return skills
 }
 
+/** GitHub source of a skill inside one of our clones (owner/repo, branch, sub-path, commit). */
+async function cloneSource(cloneDir: string, skillPath: string): Promise<SkillGithubSource | null> {
+  const repo = cloneDirs.get(cloneDir)?.input?.repo
+  if (!repo) return null
+  const [owner, name] = repo.split('/')
+  const git = async (args: string[]) => (await execFileSafe('git', ['-C', cloneDir, ...args], { timeoutMs: 10_000 })).stdout.trim()
+  const [commit, branch] = await Promise.all([git(['rev-parse', 'HEAD']).catch(() => undefined), git(['rev-parse', '--abbrev-ref', 'HEAD']).catch(() => undefined)])
+  const sub = path.relative(await fs.realpath(cloneDir), await fs.realpath(skillPath)).split(path.sep).join('/')
+  const tree = await git(['rev-parse', sub ? `HEAD:${sub}` : 'HEAD^{tree}']).catch(() => undefined)
+  const now = new Date().toISOString()
+  return {
+    owner,
+    repo: name,
+    branch: branch && branch !== 'HEAD' ? branch : 'main',
+    subPath: sub,
+    installedCommit: commit,
+    latestCommit: commit,
+    installedTree: tree,
+    latestTree: tree,
+    installedAt: now,
+    lastChecked: now,
+    updateAvailable: false,
+  }
+}
+
 export async function githubRoutes(app: FastifyInstance) {
   // POST /api/skills/market/github-clone
   app.post<{
@@ -229,7 +256,7 @@ export async function githubRoutes(app: FastifyInstance) {
     let tempDir: string | null = null
     try {
       tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'skill-hub-git-'))
-      cloneDirs.set(tempDir, { createdAt: Date.now(), repoName: repoNameFromUrl(cloneUrl) })
+      cloneDirs.set(tempDir, { createdAt: Date.now(), repoName: repoNameFromUrl(cloneUrl), input })
 
       await execFileSafe('git', ['clone', '--depth', '1', '--single-branch', '--', cloneUrl, tempDir], {
         timeoutMs: 120_000,
@@ -374,7 +401,10 @@ export async function githubRoutes(app: FastifyInstance) {
       await fs.mkdir(destParentDir, { recursive: true })
       // Never carry the clone's .git along (a repo-root skill would otherwise
       // become a nested git repository inside the warehouse).
-      await copyDir(skillPath, destPath, { skip: (name) => name === '.git' })
+      await copyDir(skillPath, destPath, { skip: (name) => name === '.git' || name === '.skill-source' })
+      // Remember where it came from, so it can be checked for updates and
+      // local edits can be told apart from upstream changes.
+      if (scope === 'global') await recordInstall(destPath, await cloneSource(ownedTemp, skillPath)).catch(() => {})
 
       invalidateCache()
       return { ok: true }

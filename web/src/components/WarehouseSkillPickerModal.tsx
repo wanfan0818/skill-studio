@@ -24,9 +24,6 @@ export function WarehouseSkillPickerModal({
   onToggleSkill,
 }: WarehouseSkillPickerModalProps) {
   const [searchQuery, setSearchQuery] = useState('')
-  // Only warehouse skills can be synced into a project from elsewhere; skills
-  // of other projects / IDEs would show up as "找不到来源".
-  const [filterWarehouseOnly, setFilterWarehouseOnly] = useState(true)
   const [onlyInstalled, setOnlyInstalled] = useState(false)
   const [busySkills, setBusySkills] = useState<Set<string>>(new Set())
 
@@ -42,9 +39,9 @@ export function WarehouseSkillPickerModal({
     }
     let list = Array.from(map.values())
 
-    if (filterWarehouseOnly) {
-      list = list.filter((s) => s.isWarehouseSource || installedSet.has(s.name))
-    }
+    // Only warehouse skills can be added: another project's own skills are
+    // private to that project (and would show up here as "找不到来源").
+    list = list.filter((s) => s.isWarehouseSource || installedSet.has(s.name))
     if (onlyInstalled) {
       list = list.filter((s) => installedSet.has(s.name))
     }
@@ -68,7 +65,7 @@ export function WarehouseSkillPickerModal({
       }
       return a.name.localeCompare(b.name)
     })
-  }, [allSkills, filterWarehouseOnly, onlyInstalled, searchQuery, installedSet])
+  }, [allSkills, onlyInstalled, searchQuery, installedSet])
 
   if (!isOpen) return null
 
@@ -127,16 +124,6 @@ export function WarehouseSkillPickerModal({
             />
           </div>
           <div className="flex items-center gap-2">
-            <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={filterWarehouseOnly}
-                onChange={(e) => setFilterWarehouseOnly(e.target.checked)}
-                className="rounded border-slate-700 bg-slate-950 text-blue-500 focus:ring-0"
-              />
-              <span>只看仓库原件</span>
-            </label>
-            <span className="text-slate-600 text-xs">|</span>
             <label className="flex items-center gap-1.5 text-xs text-slate-300 cursor-pointer select-none">
               <input
                 type="checkbox"

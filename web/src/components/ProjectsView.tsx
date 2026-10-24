@@ -60,7 +60,7 @@ interface Candidate {
 
 const CELL: Record<CellStatus, { icon: string; cls: string; label: string }> = {
   ok: { icon: '✓', cls: 'text-emerald-400', label: '已就绪' },
-  local: { icon: '⌂', cls: 'text-emerald-300', label: '项目自带' },
+  local: { icon: '⌂', cls: 'text-emerald-300', label: '仅此项目' },
   pending: { icon: '○', cls: 'text-amber-400', label: '待同步' },
   outdated: { icon: '↻', cls: 'text-sky-400', label: '副本待更新' },
   conflict: { icon: '!', cls: 'text-red-400', label: '冲突（未覆盖）' },
@@ -400,7 +400,7 @@ interface CardProps {
 }
 
 const SOURCE_BADGE: Record<InventoryItem['source'], { label: string; cls: string }> = {
-  local: { label: '项目自带', cls: 'bg-emerald-500/10 text-emerald-300' },
+  local: { label: '仅此项目', cls: 'bg-emerald-500/10 text-emerald-300' },
   warehouse: { label: '仓库', cls: 'bg-slate-800 text-slate-400' },
   missing: { label: '找不到来源', cls: 'bg-red-500/10 text-red-300' },
 }
@@ -486,7 +486,7 @@ function ProjectCard(props: CardProps) {
                         <span className="font-mono text-slate-200 truncate">/{item.name}</span>
                         <span
                           className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded ${SOURCE_BADGE[item.source].cls}`}
-                          title={item.source === 'local' ? `位于 ${item.localRel}` : undefined}
+                          title={item.source === 'local' ? `项目私有 Skill：只属于这个项目，不进仓库，也不会出现在其他项目里（位于 ${item.localRel}）` : undefined}
                         >
                           {SOURCE_BADGE[item.source].label}
                         </span>
@@ -531,7 +531,7 @@ function ProjectCard(props: CardProps) {
               <span className="text-[11px] font-medium text-sky-200">在项目目录里发现、但不在列表中（{untracked.length}）</span>
               {untrackedLocal.length > 1 && (
                 <button onClick={() => props.onAddSkills(untrackedLocal.map((i) => i.name))} className="text-[11px] text-sky-300 hover:text-white cursor-pointer">
-                  全部纳入项目自带的 {untrackedLocal.length} 个
+                  全部纳入仅此项目的 {untrackedLocal.length} 个
                 </button>
               )}
             </div>
@@ -540,7 +540,7 @@ function ProjectCard(props: CardProps) {
                 <div key={item.name} className="flex items-center gap-2 text-xs">
                   <span className="font-mono text-slate-300 truncate">/{item.name}</span>
                   <span className={`shrink-0 text-[9px] px-1.5 py-0.5 rounded ${item.untrackedKind === 'local' ? SOURCE_BADGE.local.cls : 'bg-slate-800 text-slate-500'}`}>
-                    {item.untrackedKind === 'local' ? `项目自带 · ${item.localRel}` : '旧链接/副本'}
+                    {item.untrackedKind === 'local' ? `仅此项目 · ${item.localRel}` : '旧链接/副本'}
                   </span>
                   <span className="text-[10px] text-slate-600 truncate flex-1" title={item.foundIn.join('\n')}>{item.foundIn.join('、')}</span>
                   {item.source !== 'missing' && (

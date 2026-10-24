@@ -125,7 +125,7 @@ export async function findSourceInManifests(
   skillRealPath: string,
   projectPath?: string,
   cache?: ManifestCache,
-): Promise<{ owner: string; repo: string; branch: string; subPath: string; installedCommit?: string } | null> {
+): Promise<{ owner: string; repo: string; branch: string; subPath: string; installedCommit?: string; installedTree?: string } | null> {
   const searchDirs = new Set<string>()
 
   // 1. Skill folder's parent directories (go up 3 levels to find root of repo/project)
@@ -177,6 +177,8 @@ export async function findSourceInManifests(
                 branch: parsed.branch || 'main',
                 subPath: subPath || '',
                 installedCommit: entry.computedHash || entry.skillFolderHash || undefined,
+                // `npx skills` records the folder's git tree SHA, not a commit.
+                installedTree: typeof entry.skillFolderHash === 'string' ? entry.skillFolderHash : undefined,
               }
             }
           }
