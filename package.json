@@ -1,6 +1,6 @@
 {
   "name": "claude-skill-studio",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Claude Code Skill Studio - 一键扫描并管理所有 Claude Agent Skills",
   "type": "module",
   "bin": {

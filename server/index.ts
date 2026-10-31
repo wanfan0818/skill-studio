@@ -17,6 +17,7 @@ import { githubRoutes } from './routes/github.js'
 import { projectRoutes } from './routes/projects.js'
 import { updaterRoutes } from './routes/updater.js'
 import { updateStateRoutes } from './routes/updates.js'
+import { qualityRoutes } from './routes/quality.js'
 import { globalRoutes } from './routes/global.js'
 import { startWatcher, stopWatcher, type WatchCallback } from './scanner/watcher.js'
 import { invalidateCache } from './routes/skills.js'
@@ -95,6 +96,7 @@ await app.register(githubRoutes)
 await app.register(projectRoutes)
 await app.register(updaterRoutes)
 await app.register(updateStateRoutes)
+await app.register(qualityRoutes)
 await app.register(globalRoutes)
 await app.register(distributionRoutes)
 

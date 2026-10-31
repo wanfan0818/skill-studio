@@ -18,12 +18,13 @@ import { Footer } from './components/Footer'
 import { ExploreView } from './components/ExploreView'
 import { ProjectsView } from './components/ProjectsView'
 import { UpdatesView } from './components/UpdatesView'
+import { QualityView } from './components/QualityView'
 import { GlobalSkillsModal } from './components/GlobalSkillsModal'
 import type { Skill } from './hooks/useSkills'
 import { AGENT_ORDER, AGENT_META } from './agents'
 
 type GroupBy = 'none' | 'scope' | 'source' | 'project' | 'category'
-type View = 'skills' | 'similar' | 'explore' | 'dashboard' | 'trash' | 'sync' | 'conflicts' | 'projects' | 'updates'
+type View = 'skills' | 'similar' | 'explore' | 'dashboard' | 'trash' | 'sync' | 'conflicts' | 'projects' | 'updates' | 'quality'
 
 function App() {
   const { allSkills, skills, stats, projects, conflicts, categories, health, mergeSuggestions, loading, error, scan, filterSkills } = useSkills()
@@ -42,12 +43,19 @@ function App() {
   const [lastUpdate, setLastUpdate] = useState<string | null>(null)
   const [trashCount, setTrashCount] = useState<number>(0)
   const [updatesCount, setUpdatesCount] = useState<number>(0)
+  const [qualityCount, setQualityCount] = useState<number>(0)
   // Badge for 版本与更新: local state only, no GitHub calls.
   useEffect(() => {
     fetch('/api/updates')
       .then((r) => r.json())
       .then((d) => {
         if (d.ok) setUpdatesCount(d.skills.filter((s: any) => s.state !== 'synced' || s.copies.length > 0 || s.source?.missing).length)
+      })
+      .catch(() => {})
+    fetch('/api/quality')
+      .then((r) => r.json())
+      .then((d) => {
+        if (d.ok) setQualityCount(d.counts.skillsWithProblems + d.counts.overloadedIdes)
       })
       .catch(() => {})
   }, [])
@@ -322,6 +330,7 @@ function App() {
         }}
         trashCount={trashCount}
         updatesCount={updatesCount}
+        qualityCount={qualityCount}
       />
 
       {/* 中间栏与右边栏的容器 */}
@@ -348,6 +357,7 @@ function App() {
                     {view === 'sync' && '路径配置与同步'}
                     {view === 'trash' && '回收站'}
                     {view === 'updates' && '版本与更新'}
+                    {view === 'quality' && 'Skill 体检'}
                     {view === 'conflicts' && '冲突管理'}
                   </span>
                   {view === 'skills' && (
@@ -474,6 +484,18 @@ function App() {
                   <Dashboard stats={stats} projects={projects} conflicts={conflicts} skills={allSkills} health={health} categories={categories} mergeSuggestions={mergeSuggestions} onSkillClick={setSelectedSkill} onScan={scan} />
                 ) : view === 'similar' ? (
                   <SimilarView onSkillClick={setSelectedSkill} />
+                ) : view === 'quality' ? (
+                  <QualityView
+                    onChanged={() => scan()}
+                    onCountChange={setQualityCount}
+                    onOpenSkill={(realPath, name) => {
+                      const hit =
+                        allSkills.find((s) => s.realPath === realPath && s.isWarehouseSource) ??
+                        allSkills.find((s) => s.realPath === realPath) ??
+                        allSkills.find((s) => s.name === name && s.isWarehouseSource)
+                      if (hit) setSelectedSkill(hit)
+                    }}
+                  />
                 ) : view === 'updates' ? (
                   <UpdatesView onChanged={() => scan()} onCountChange={setUpdatesCount} />
                 ) : view === 'trash' ? (

@@ -20,6 +20,8 @@ interface SidebarProps {
   trashCount: number
   /** Skills whose versions need attention (upstream news, local edits, drifted copies). */
   updatesCount?: number
+  /** Skills with problems + overloaded IDEs. */
+  qualityCount?: number
 }
 
 export function Sidebar({
@@ -39,6 +41,7 @@ export function Sidebar({
   onViewChange,
   trashCount,
   updatesCount = 0,
+  qualityCount = 0,
 }: SidebarProps) {
   const scopeItems = [
     { value: 'all', label: '全部', count: stats.total },
@@ -72,6 +75,7 @@ export function Sidebar({
     { value: 'dashboard', label: '大盘数据', icon: '📊' },
     { value: 'skills', label: '技能库', icon: '📂', count: stats.total },
     { value: 'updates', label: '版本与更新', icon: '🔄', count: updatesCount || undefined },
+    { value: 'quality', label: 'Skill 体检', icon: '🩺', count: qualityCount || undefined },
     { value: 'explore', label: '探索市场', icon: '🔍' },
     { value: 'projects', label: '项目管理', icon: '📁' },
     { value: 'sync', label: '路径与同步', icon: '⚙️' },

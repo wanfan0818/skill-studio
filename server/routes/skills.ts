@@ -118,7 +118,7 @@ export async function skillRoutes(app: FastifyInstance) {
       cachedResult = await fullScan()
     }
     return {
-      version: '0.3.0',
+      version: '0.4.0',
       node: process.version,
       platform: process.platform,
       cwd: process.cwd(),
