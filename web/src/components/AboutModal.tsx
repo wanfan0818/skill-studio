@@ -7,7 +7,7 @@ interface Props {
   conflictCount: number
 }
 
-const VERSION = '0.3.0'
+const VERSION = '0.4.0'
 
 export function AboutModal({ open, onClose, stats, conflictCount }: Props) {
   // Lock scroll while open + esc to close
