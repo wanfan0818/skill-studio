@@ -136,6 +136,39 @@ describe('IDE routing load', () => {
     expect((await Q.previewTrim('workbuddy', names.slice(0, 10))).remove).toContain('old-alias')
   })
 
+  it('flags skills in the same IDE that compete for the same requests', async () => {
+    const cDir = path.join(home, 'conflicts')
+    const mk = (folder: string, name: string, desc: string) => {
+      fs.mkdirSync(path.join(cDir, folder), { recursive: true })
+      fs.writeFileSync(path.join(cDir, folder, 'SKILL.md'), `---\nname: ${name}\ndescription: ${desc}\n---\n`)
+      return { entryName: folder, real: path.join(cDir, folder) }
+    }
+    const { tokenize, buildSynonymIndex, BUILTIN_SYNONYMS } = await import('../server/scanner/nlp')
+    const idx = buildSynonymIndex(BUILTIN_SYNONYMS)
+    const meta = (e: { entryName: string; real: string }, name: string, desc: string) => ({ ...e, name, tokens: 1, sig: tokenize(`${name} ${desc}`, idx) })
+    const a = meta(mk('meeting-notes', 'meeting-notes', '把会议录音整理成会议纪要和待办事项'), 'meeting-notes', '把会议录音整理成会议纪要和待办事项')
+    const b = meta(mk('meeting-minutes', 'meeting-minutes', '把会议录音整理成会议纪要，提取待办事项'), 'meeting-minutes', '把会议录音整理成会议纪要，提取待办事项')
+    const c = meta(mk('pdf-tool', 'pdf-tool', 'Merge, split and rotate PDF files'), 'pdf-tool', 'Merge, split and rotate PDF files')
+    const alias = { ...a, entryName: 'notes-alias' } // same folder linked twice
+    const twin = { ...c, entryName: 'pdf-tool-2', real: path.join(cDir, 'elsewhere') } // different folder, same name
+    const r = Q.findConflicts([a, b, c, alias, twin])
+    const kinds = Object.fromEntries(r.map((x) => [[x.a, x.b].sort().join('+'), x.kind]))
+    expect(kinds['meeting-minutes+meeting-notes']).toBe('similar')
+    expect(kinds['meeting-notes+notes-alias']).toBe('duplicate')
+    expect(kinds['pdf-tool+pdf-tool-2']).toBe('same-name')
+    expect(kinds['meeting-notes+pdf-tool']).toBeUndefined()
+    expect(r[r.length - 1].kind).toBe('similar') // strongest first
+
+    // End to end: the IDE report marks both sides.
+    fs.symlinkSync(path.join(cDir, 'meeting-notes'), path.join(wbDir, 'meeting-notes'))
+    fs.symlinkSync(path.join(cDir, 'meeting-minutes'), path.join(wbDir, 'meeting-minutes'))
+    const wb = (await Q.qualityReport()).ides.find((i) => i.id === 'workbuddy')!
+    expect(wb.skills.find((s) => s.name === 'meeting-notes')?.competitors).toContain('meeting-minutes')
+    expect(wb.conflicts.some((x) => x.kind === 'similar' && [x.a, x.b].includes('meeting-notes'))).toBe(true)
+    fs.unlinkSync(path.join(wbDir, 'meeting-notes'))
+    fs.unlinkSync(path.join(wbDir, 'meeting-minutes'))
+  })
+
   it('restoring "all" brings every warehouse skill back', async () => {
     const r = await Q.applyTrim('workbuddy', 'all')
     expect(r.failed).toBe(0)

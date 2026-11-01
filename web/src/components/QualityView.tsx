@@ -28,8 +28,17 @@ interface SkillCheck {
 interface IdeSkill {
   name: string
   tokens: number
+  competitors: string[]
   managed: boolean
   projects: string[]
+}
+
+interface Conflict {
+  a: string
+  b: string
+  kind: 'duplicate' | 'same-name' | 'similar'
+  score: number
+  shared: string[]
 }
 
 interface IdeLoad {
@@ -42,12 +51,14 @@ interface IdeLoad {
   level: Level
   mode: Mode
   skills: IdeSkill[]
+  conflicts: Conflict[]
+  strongConflicts: number
 }
 
 interface Report {
   ides: IdeLoad[]
   skills: SkillCheck[]
-  counts: { error: number; warn: number; info: number; skillsWithProblems: number; overloadedIdes: number }
+  counts: { error: number; warn: number; info: number; skillsWithProblems: number; overloadedIdes: number; strongConflicts: number }
 }
 
 interface Preview {
@@ -125,9 +136,13 @@ export function QualityView({
     <div className="space-y-6 max-w-5xl">
       <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-4">
         <div className="text-sm font-semibold text-slate-100">
-          {report.counts.overloadedIdes === 0 && report.counts.skillsWithProblems === 0
+          {report.counts.overloadedIdes === 0 && report.counts.skillsWithProblems === 0 && report.counts.strongConflicts === 0
             ? '体检通过 ✅'
-            : [report.counts.overloadedIdes ? `${report.counts.overloadedIdes} 个 IDE 加载的 Skill 太多` : '', report.counts.skillsWithProblems ? `${report.counts.skillsWithProblems} 个 Skill 有问题` : '']
+            : [
+                report.counts.overloadedIdes ? `${report.counts.overloadedIdes} 个 IDE 加载的 Skill 太多` : '',
+                report.counts.strongConflicts ? `${report.counts.strongConflicts} 对 Skill 很相似、容易抢触发` : '',
+                report.counts.skillsWithProblems ? `${report.counts.skillsWithProblems} 个 Skill 有问题` : '',
+              ]
                 .filter(Boolean)
                 .join(' · ')}
         </div>
@@ -164,6 +179,11 @@ export function QualityView({
                   {inProjects > 0 && ` · ${inProjects} 个在项目里也在用`}
                   {ide.count - managed > 0 && ` · ${ide.count - managed} 个不是 Skill Studio 放的`}
                 </div>
+                {ide.conflicts.length > 0 && (
+                  <div className={`text-[10px] ${ide.strongConflicts ? 'text-amber-300' : 'text-slate-500'}`}>
+                    ⚔️ {ide.conflicts.length} 对相似 Skill{ide.strongConflicts ? `，其中 ${ide.strongConflicts} 对很像` : ''}
+                  </div>
+                )}
                 {managed > 0 && (
                   <button
                     onClick={() => setTrimId(trimId === ide.id ? null : ide.id)}
@@ -187,6 +207,8 @@ export function QualityView({
           />
         )}
       </section>
+
+      <ConflictList ides={report.ides} skills={report.skills} onOpenSkill={onOpenSkill} />
 
       <IssueList skills={report.skills} counts={report.counts} onOpenSkill={onOpenSkill} />
     </div>
@@ -282,6 +304,12 @@ function TrimPanel({ ide, onDone }: { ide: IdeLoad; onDone: (r: Report) => void 
             {s.projects.length > 0 && (
               <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/10 text-emerald-300" title={s.projects.join('、')}>
                 项目在用 {s.projects.length}
+              </span>
+            )}
+            {s.competitors.length > 0 && (
+              <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-300" title={`和这些 Skill 很像，Agent 可能分不清：${s.competitors.join('、')}`}>
+                与 {s.competitors[0]}
+                {s.competitors.length > 1 ? ` 等 ${s.competitors.length} 个` : ''} 相似
               </span>
             )}
             <span className="ml-auto shrink-0 text-[10px] text-slate-500">≈{s.tokens} tokens</span>
@@ -380,6 +408,88 @@ function TrimPanel({ ide, onDone }: { ide: IdeLoad; onDone: (r: Report) => void 
         </div>
       )}
     </div>
+  )
+}
+
+const KIND: Record<Conflict['kind'], { label: string; cls: string }> = {
+  duplicate: { label: '同一个 Skill 链接了两次', cls: 'text-rose-300 bg-rose-500/10' },
+  'same-name': { label: '同名', cls: 'text-rose-300 bg-rose-500/10' },
+  similar: { label: '描述相近', cls: 'text-amber-300 bg-amber-500/10' },
+}
+
+const STRONG = 0.4
+
+/** Similar skills loaded side by side in one IDE: the agent may pick the wrong one. */
+function ConflictList({ ides, skills, onOpenSkill }: { ides: IdeLoad[]; skills: SkillCheck[]; onOpenSkill?: (realPath: string, name: string) => void }) {
+  const [showWeak, setShowWeak] = useState(false)
+  // The same pair usually shows up in several IDEs: list it once, with every IDE it's in.
+  const pairs = useMemo(() => {
+    const m = new Map<string, Conflict & { ides: string[] }>()
+    for (const ide of ides) {
+      for (const c of ide.conflicts) {
+        const key = [c.a, c.b].sort().join('\u0000')
+        const hit = m.get(key)
+        if (hit) hit.ides.push(ide.name)
+        else m.set(key, { ...c, ides: [ide.name] })
+      }
+    }
+    return [...m.values()].sort((x, y) => y.score - x.score || x.a.localeCompare(y.a))
+  }, [ides])
+  const byFolder = useMemo(() => new Map(skills.map((s) => [s.path.split('/').pop()!, s])), [skills])
+
+  if (pairs.length === 0) return null
+  const strong = pairs.filter((p) => p.kind !== 'similar' || p.score >= STRONG)
+  const shown = showWeak ? pairs : strong
+
+  const name = (n: string) => {
+    const s = byFolder.get(n)
+    return s ? (
+      <button onClick={() => onOpenSkill?.(s.realPath, s.name)} className="font-mono text-slate-100 hover:text-indigo-300 cursor-pointer" title="打开查看和编辑">
+        {n}
+      </button>
+    ) : (
+      <span className="font-mono text-slate-100">{n}</span>
+    )
+  }
+
+  return (
+    <section className="space-y-2">
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-xs font-semibold text-slate-300 mr-2">相似 Skill（同一个 IDE 里会抢触发）</h3>
+        <button
+          onClick={() => setShowWeak(!showWeak)}
+          className="px-3 py-1 rounded-full text-xs border border-slate-800 text-slate-400 hover:text-slate-200 cursor-pointer"
+        >
+          {showWeak ? `只看很像的（${strong.length}）` : `也看有点像的（${pairs.length}）`}
+        </button>
+      </div>
+      <div className="text-[10px] text-slate-500 leading-relaxed">
+        Agent 按名称和描述挑 Skill，两个 Skill 说的事差不多时，它可能挑错或时好时坏。处理办法：合并成一个；或者在两边的 description 里写清分工（「用于……；不用于……，那种情况用 xxx」）；或者精简时这个 IDE 里只留一个。
+      </div>
+      {shown.length === 0 ? (
+        <div className="text-xs text-slate-500 py-4 text-center">没有很像的 Skill ✅</div>
+      ) : (
+        <div className="space-y-1.5">
+          {shown.map((p) => (
+            <div key={`${p.a}|${p.b}`} className="rounded-lg border border-slate-800 bg-slate-900/60 px-3 py-2 text-xs">
+              <div className="flex flex-wrap items-center gap-2">
+                {name(p.a)}
+                <span className="text-slate-500">↔</span>
+                {name(p.b)}
+                <span className={`text-[10px] px-1.5 py-0.5 rounded ${KIND[p.kind].cls}`}>
+                  {KIND[p.kind].label}
+                  {p.kind === 'similar' && ` ${Math.round(p.score * 100)}%`}
+                </span>
+                <span className="ml-auto text-[10px] text-slate-500">{p.ides.join('、')}</span>
+              </div>
+              {p.kind === 'similar' && p.shared.length > 0 && <div className="mt-1 text-[10px] text-slate-500">共同的词：{p.shared.join('、')}</div>}
+              {p.kind === 'duplicate' && <div className="mt-1 text-[10px] text-slate-500">两个名字指向同一个目录，Agent 会看到两份一样的描述。删掉其中一个链接。</div>}
+              {p.kind === 'same-name' && <div className="mt-1 text-[10px] text-slate-500">两个不同的 Skill 声明了同一个 name，IDE 可能只加载其中一个，或随机挑一个。</div>}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   )
 }
 

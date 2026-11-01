@@ -11,6 +11,7 @@ import { listSources, inspect, apply, readMarker, realOr, PlanChangedError, type
 import { readDistribution, updateDistribution, type AgentMode, type DistributionState } from '../distribution/state.js'
 import { listConfiguredProjects } from '../projects/model.js'
 import { lintSkill, estimateTokens, type LintIssue, type LintResult } from './lint.js'
+import { BUILTIN_SYNONYMS, buildSynonymIndex, tokenize, jaccard } from '../scanner/nlp.js'
 
 /**
  * Skill 体检: per-skill package checks, and the routing load of every IDE —
@@ -32,6 +33,8 @@ export function loadLevel(count: number): LoadLevel {
 export interface IdeSkill {
   name: string
   tokens: number
+  /** Other skills in the same IDE this one competes with for triggering (see IdeConflict). */
+  competitors: string[]
   /**
    * A link straight into the warehouse, or a managed copy of a warehouse
    * skill — the same ownership rule the distribution engine uses, so these
@@ -41,6 +44,24 @@ export interface IdeSkill {
   /** Configured projects that use this skill AND select this IDE: still available there after trimming. */
   projects: string[]
 }
+
+/**
+ * Two skills in one IDE that an agent may confuse. Research on skill routing:
+ * a single semantic competitor costs 7–30% accuracy, two cost 17–63%.
+ *   duplicate – the same skill folder loaded twice under two names
+ *   same-name – two different skills declaring the same name
+ *   similar   – overlapping name + description (Jaccard over word / CJK bigram tokens)
+ */
+export interface IdeConflict {
+  a: string
+  b: string
+  kind: 'duplicate' | 'same-name' | 'similar'
+  score: number
+  shared: string[]
+}
+
+export const SIMILAR_MIN = 0.25
+export const SIMILAR_STRONG = 0.4
 
 export interface IdeLoad {
   id: string
@@ -53,6 +74,9 @@ export interface IdeLoad {
   /** Distribution rule mode; null = Skill Studio doesn't manage this IDE's global dir. */
   mode: AgentMode | null
   skills: IdeSkill[]
+  /** Strongest first; duplicates and same-name pairs count as strong. */
+  conflicts: IdeConflict[]
+  strongConflicts: number
 }
 
 export interface SkillCheck {
@@ -67,7 +91,7 @@ export interface SkillCheck {
 export interface QualityReport {
   ides: IdeLoad[]
   skills: SkillCheck[]
-  counts: { error: number; warn: number; info: number; skillsWithProblems: number; overloadedIdes: number }
+  counts: { error: number; warn: number; info: number; skillsWithProblems: number; overloadedIdes: number; strongConflicts: number }
 }
 
 // Lint results by real path, valid while the folder's stat signature is unchanged.
@@ -83,7 +107,9 @@ async function cachedLint(dir: string): Promise<LintResult> {
 }
 
 /** Routing-relevant metadata (name + description) of a skill folder, by real path. */
-type MetaCache = Map<string, Promise<{ name: string; tokens: number } | null>>
+type Meta = { name: string; tokens: number; sig: Set<string> }
+type MetaCache = Map<string, Promise<Meta | null>>
+const synonymIndex = buildSynonymIndex(BUILTIN_SYNONYMS)
 
 function skillMeta(real: string, fallbackName: string, cache: MetaCache) {
   let hit = cache.get(real)
@@ -98,7 +124,7 @@ function skillMeta(real: string, fallbackName: string, cache: MetaCache) {
         const fm = (await parseSkillMd(path.join(real, file))).frontmatter ?? {}
         const name = typeof fm.name === 'string' && fm.name.trim() ? fm.name.trim() : fallbackName
         const desc = typeof fm.description === 'string' ? fm.description : ''
-        return { name, tokens: estimateTokens(`${name}: ${desc}`) }
+        return { name, tokens: estimateTokens(`${name}: ${desc}`), sig: tokenize(`${name} ${desc}`, synonymIndex) }
       }
       return null
     })()
@@ -118,6 +144,7 @@ async function ideLoad(
   if (!agent || !agent.globalPaths.length) return null
   const dirs = agentGlobalPaths(agent, os.homedir())
   const byName = new Map<string, IdeSkill>()
+  const loaded: Loaded[] = []
   for (const dir of dirs) {
     const entries = await fs.readdir(dir, { withFileTypes: true }).catch(() => [])
     const found = await mapLimit(
@@ -137,13 +164,19 @@ async function ideLoad(
           const origin = (await readMarker(entry))?.originPath
           managed = !!origin && warehouseParents.has(path.dirname((await realOr(origin)) ?? path.resolve(origin)))
         }
-        return { entryName: e.name, ...m, managed }
+        return { entryName: e.name, real, ...m, managed }
       },
     )
     for (const f of found) {
       if (!f || byName.has(f.entryName)) continue
-      byName.set(f.entryName, { name: f.entryName, tokens: f.tokens, managed: f.managed, projects: usedBy.get(agentId)?.get(f.entryName) ?? [] })
+      byName.set(f.entryName, { name: f.entryName, tokens: f.tokens, competitors: [], managed: f.managed, projects: usedBy.get(agentId)?.get(f.entryName) ?? [] })
+      loaded.push(f)
     }
+  }
+  const conflicts = findConflicts(loaded)
+  for (const c of conflicts) {
+    byName.get(c.a)?.competitors.push(c.b)
+    byName.get(c.b)?.competitors.push(c.a)
   }
   const skills = [...byName.values()].sort((a, b) => b.tokens - a.tokens)
   return {
@@ -156,7 +189,37 @@ async function ideLoad(
     level: loadLevel(skills.length),
     mode: state.agents[agent.id]?.mode ?? null,
     skills,
+    conflicts,
+    strongConflicts: conflicts.filter((c) => c.kind !== 'similar' || c.score >= SIMILAR_STRONG).length,
   }
+}
+
+type Loaded = { entryName: string; real: string } & Meta
+
+// Overlap words worth showing: CJK bigram fragments ("页中") and routing boilerplate say nothing.
+const GENERIC = new Set(['trigger', 'triggers', 'how', 'use', 'when', 'user', 'skill', 'skills', 'this', 'auto-generated'])
+const readable = (t: string) => !/^[\u4e00-\u9fff]{2}$/.test(t) && !GENERIC.has(t)
+
+/** Pairs of loaded skills an agent may confuse, strongest first. */
+export function findConflicts(loaded: Loaded[]): IdeConflict[] {
+  const out: IdeConflict[] = []
+  for (let i = 0; i < loaded.length; i++) {
+    for (let j = i + 1; j < loaded.length; j++) {
+      const x = loaded[i]
+      const y = loaded[j]
+      if (x.real === y.real) {
+        out.push({ a: x.entryName, b: y.entryName, kind: 'duplicate', score: 1, shared: [] })
+      } else if (x.name === y.name) {
+        out.push({ a: x.entryName, b: y.entryName, kind: 'same-name', score: 1, shared: [x.name] })
+      } else {
+        const score = jaccard(x.sig, y.sig)
+        if (score < SIMILAR_MIN) continue
+        const shared = [...x.sig].filter((t) => y.sig.has(t) && readable(t)).slice(0, 6)
+        out.push({ a: x.entryName, b: y.entryName, kind: 'similar', score: Math.round(score * 100) / 100, shared })
+      }
+    }
+  }
+  return out.sort((p, q) => q.score - p.score || p.a.localeCompare(q.a))
 }
 
 /** agentId → skill → names of configured projects that use the skill with that IDE. */
@@ -189,7 +252,7 @@ export async function qualityReport(): Promise<QualityReport> {
   })
   skills.sort((a, b) => a.name.localeCompare(b.name))
 
-  const counts = { error: 0, warn: 0, info: 0, skillsWithProblems: 0, overloadedIdes: ides.filter((i) => i.level === 'red').length }
+  const counts = { error: 0, warn: 0, info: 0, skillsWithProblems: 0, overloadedIdes: ides.filter((i) => i.level === 'red').length, strongConflicts: ides.reduce((n, i) => n + i.strongConflicts, 0) }
   for (const s of skills) {
     for (const i of s.issues) counts[i.severity]++
     if (s.issues.some((i) => i.severity !== 'info')) counts.skillsWithProblems++
